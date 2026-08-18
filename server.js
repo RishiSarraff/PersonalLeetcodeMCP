@@ -361,6 +361,117 @@ function createMcpServer() {
 const app = express();
 app.use(express.json());
 
+// ─── Stub OAuth (auto-approve, no real auth) ─────────────────────────────────
+// This exists only to satisfy Claude's OAuth Dynamic Client Registration (DCR)
+// handshake. It does not protect anything — every request is auto-approved.
+// In-memory only; resets on server restart, which is fine since nothing here
+// is meant to persist.
+ 
+const clients = new Map();   // client_id -> client metadata
+const authCodes = new Map(); // code -> { client_id, redirect_uri, expires }
+const tokens = new Map();    // access_token -> { client_id, expires }
+ 
+function randomToken(prefix) {
+  return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
+ 
+// Base URL Claude uses to reach this server. Render sets RENDER_EXTERNAL_URL;
+// fall back to constructing from the request if that's not set.
+function baseUrl(req) {
+  return process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+}
+ 
+// 1. OAuth server metadata (RFC 8414)
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const b = baseUrl(req);
+  res.json({
+    issuer: b,
+    authorization_endpoint: `${b}/oauth/authorize`,
+    token_endpoint: `${b}/oauth/token`,
+    registration_endpoint: `${b}/oauth/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256", "plain"],
+    token_endpoint_auth_methods_supported: ["none"],
+  });
+});
+ 
+// 2. Protected resource metadata (RFC 9728) — some clients check this too
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  const b = baseUrl(req);
+  res.json({
+    resource: `${b}/mcp`,
+    authorization_servers: [b],
+  });
+});
+ 
+// 3. Dynamic Client Registration (RFC 7591) — always succeeds
+app.post("/oauth/register", (req, res) => {
+  const client_id = randomToken("client");
+  const client = {
+    client_id,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    redirect_uris: req.body?.redirect_uris || [],
+    token_endpoint_auth_method: "none",
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+  };
+  clients.set(client_id, client);
+  res.status(201).json(client);
+});
+ 
+// 4. Authorization endpoint — auto-approves, immediately redirects with a code
+app.get("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state, client_id } = req.query;
+  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
+ 
+  const code = randomToken("code");
+  authCodes.set(code, {
+    client_id,
+    redirect_uri,
+    expires: Date.now() + 60_000,
+  });
+ 
+  const url = new URL(redirect_uri);
+  url.searchParams.set("code", code);
+  if (state) url.searchParams.set("state", state);
+  res.redirect(url.toString());
+});
+ 
+// 5. Token endpoint — exchanges the code for a dummy access token
+app.post("/oauth/token", express.urlencoded({ extended: true }), (req, res) => {
+  const { code, grant_type } = req.body;
+ 
+  if (grant_type !== "authorization_code") {
+    return res.status(400).json({ error: "unsupported_grant_type" });
+  }
+ 
+  const entry = authCodes.get(code);
+  if (!entry || entry.expires < Date.now()) {
+    return res.status(400).json({ error: "invalid_grant" });
+  }
+  authCodes.delete(code);
+ 
+  const access_token = randomToken("token");
+  tokens.set(access_token, {
+    client_id: entry.client_id,
+    expires: Date.now() + 3600_000,
+  });
+ 
+  res.json({
+    access_token,
+    token_type: "Bearer",
+    expires_in: 3600,
+  });
+});
+// ─── End stub OAuth ───────────────────────────────────────────────────────────
+
+
+function randomToken(prefix){
+  return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
+}
+
+
 // Health check
 app.get("/health", (_, res) => res.json({ status: "ok", server: "leetcode-mcp" }));
 
