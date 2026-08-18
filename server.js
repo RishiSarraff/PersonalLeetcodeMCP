@@ -2,20 +2,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { z } from "zod";
+import "dotenv/config";
+
 
 const LEETCODE_GRAPHQL = "https://leetcode.com/graphql";
 
+const csrftoken = process.env.CSRF_TOKEN;
+const leetcode_session = process.env.LEETCODE_SESSION;
+
 // ─── LeetCode GraphQL helpers ───────────────────────────────────────────────
 
-async function lcQuery(query, variables = {}, session = null) {
+async function lcQuery(query, variables = {}, session = leetcode_session) {
   const headers = {
     "Content-Type": "application/json",
     Referer: "https://leetcode.com",
     Origin: "https://leetcode.com",
   };
   if (session) {
-    headers["Cookie"] = `LEETCODE_SESSION=${session}`;
-    headers["X-CSRFToken"] = "csrftoken"; // LeetCode requires this header
+    headers["Cookie"] = `LEETCODE_SESSION=${session}; csrftoken=${csrftoken}`;
+    headers["X-CSRFToken"] = csrftoken;
   }
 
   const res = await fetch(LEETCODE_GRAPHQL, {
@@ -120,6 +125,32 @@ const DAILY_CHALLENGE_QUERY = `
         topicTags { name }
         acRate
       }
+    }
+  }
+`;
+
+const PROBLEMSET_QUERY_V2 = `
+  query problemsetQuestionListV2($filters: QuestionFilterInput, $limit: Int, $searchKeyword: String, $skip: Int, $sortBy: QuestionSortByInput, $categorySlug: String) {
+    problemsetQuestionListV2(
+      filters: $filters
+      limit: $limit
+      searchKeyword: $searchKeyword
+      skip: $skip
+      sortBy: $sortBy
+      categorySlug: $categorySlug
+    ) {
+      questions {
+        titleSlug
+        title
+        questionFrontendId
+        paidOnly
+        difficulty
+        topicTags { name slug }
+        acRate
+        frequency
+      }
+      totalLength
+      hasMore
     }
   }
 `;
@@ -352,6 +383,75 @@ function createMcpServer() {
       return { content: [{ type: "text", text }] };
     }
   );
+
+  // ------------- PROBLEM DISCOVERY AND TARGETING --------------
+
+  // Tool: search problems by topic
+  server.tool(
+    "search_problems_by_topic",
+    "Search Leetcode problems by Topic Tag and/or Difficulty",
+    {
+      tag: z.string().optional().describe("Topic tag slug, e.g. 'union-find', 'dynamic programming'"),
+      difficulty: z.enum(["EASY", "MEDIUM", "HARD"]).optional(),
+      limit: z.number().int().min(1).max(50).default(15),
+      excludePremium: z.boolean().default(false).describe("Exclude paid-only problems from results"),
+    },
+    async ({tag, difficulty, limit, excludePremium}) => {
+      const filters = {
+        filterCombineType: "ALL",
+        difficultyFilter: {
+          difficulties: difficulty ? [difficulty] : [],
+          operator: "IS",
+        },
+        topicFilter: {
+          topicSlugs: tag ? [tag] : [],
+          operator: "IS",
+        },
+      }
+      const data = await lcQuery(PROBLEMSET_QUERY_V2, {
+        categorySlug: "all-code-essentials",
+        skip: 0,
+        limit,
+        searchKeyword: "",
+        filters,
+        sortBy: { sortField: "CUSTOM", sortOrder: "ASCENDING" },
+      });
+
+      let questions = data.problemsetQuestionListV2.questions
+      if (excludePremium) questions = questions.filter((q) => !q.paidOnly);
+      
+      if (!questions.length) {
+        return { content: [{ type: "text", text: "No problems found for those filters." }] };
+      }
+
+      const lines = [`## Problems${tag ? ` — ${tag}` : ""}${difficulty ? ` (${difficulty})` : ""}\n`];
+      for (const q of questions) {
+        lines.push(
+          `- **${q.questionFrontendId}. ${q.title}**${q.paidOnly ? " 🔒" : ""} (${q.difficulty}) — ${q.acRate.toFixed(1)}% acceptance${q.frequency ? `, freq: ${q.frequency.toFixed(1)}` : ""}`
+        );
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  // Tool: get_problem_details
+  // Tool: get_similar_problems
+  // Tool: recommend_next_problem
+
+  // -------------- MOCK INTERVIEW SIMULATION --------------
+
+  // Tool: start_mock_interview
+  // Tool: get_contest_history
+
+  // -------------- PROGRESS TRACKING WITH REAL MEMORY --------------
+
+  // Tool: log_attempt
+  // Tool: get_due_for_review
+
+  // -------------- DEEPER ANALYSIS --------------
+  // Tool: compare_topic_coverage
+
 
   return server;
 }
