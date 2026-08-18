@@ -253,6 +253,34 @@ query questionDetail($titleSlug: String!) {
 }
 `
 
+const SIMILAR_QUESTIONS_QUERY = `
+  query similarQuestions($titleSlug: String!) {
+    question(titleSlug: $titleSlug) {
+      title
+      similarQuestionList {
+        title
+        titleSlug
+        difficulty
+        isPaidOnly
+      }
+    }
+  }
+`;
+
+const NEXT_CHALLENGES_QUERY = `
+  query nextChallenges($titleSlug: String!) {
+    question(titleSlug: $titleSlug) {
+      title
+      nextChallenges {
+        title
+        titleSlug
+        difficulty
+        questionFrontendId
+      }
+    }
+  }
+`;
+
 
 // ─── Analysis helpers ────────────────────────────────────────────────────────
 
@@ -609,7 +637,74 @@ function createMcpServer() {
   );
 
   // Tool: get_similar_problems
+  server.tool(
+    "get_similar_problems",
+    "Get the Similar Problems of a specific LeetCode problem",
+    {
+      titleSlug: z.string().describe("URL slug of the problem (not the display title), e.g. 'two-sum'"),
+    },
+    async ({ titleSlug }) => {
+      const data = await lcQuery(SIMILAR_QUESTIONS_QUERY, { titleSlug });
+      const q = data.question;
+
+      if (!q) {
+        return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      }
+
+      const similarQuestionList = q.similarQuestionList
+
+      if(similarQuestionList.length == 0){
+        // no similar questions we return a no result
+        return { content: [{ type: "text", text: `No Similar questions found for "${titleSlug}".`}] };
+      }
+
+      // ── Build response ──────────────────────────────────────────────────────
+      const lines = [`Similar Problems for ${q.title}:\n`];
+
+      for (const similarQuestion of similarQuestionList) {
+        lines.push(
+          `- **${similarQuestion.title}**${similarQuestion.isPaidOnly ? " 🔒" : ""} (${similarQuestion.difficulty})`
+        );
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
   // Tool: recommend_next_problem
+  server.tool(
+    "recommend_next_problem",
+    "Leetcode's recommendation the Next Challenges after a specific LeetCode problem",
+    {
+      titleSlug: z.string().describe("URL slug of the problem (not the display title), e.g. 'two-sum'"),
+    },
+    async ({ titleSlug }) => {
+      const data = await lcQuery(NEXT_CHALLENGES_QUERY, { titleSlug });
+      const q = data.question;
+
+      if (!q) {
+        return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      }
+
+      const nextChallengesList = q.nextChallenges
+
+      if(nextChallengesList.length == 0){
+        // no similar questions we return a no result
+        return { content: [{ type: "text", text: `No Next Challenges were found for "${titleSlug}".`}] };
+      }
+
+      // ── Build response ──────────────────────────────────────────────────────
+      const lines = [`Next Challenges for ${q.title}:\n`];
+
+      for (const nextChallenge of nextChallengesList) {
+        lines.push(
+          `- **LC ${nextChallenge.questionFrontendId}: ${nextChallenge.title}** (${nextChallenge.difficulty})`
+        );
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
 
   // -------------- MOCK INTERVIEW SIMULATION --------------
 
