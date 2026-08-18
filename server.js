@@ -466,12 +466,6 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), (req, res) => {
 });
 // ─── End stub OAuth ───────────────────────────────────────────────────────────
 
-
-function randomToken(prefix){
-  return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
-}
-
-
 // Health check
 app.get("/health", (_, res) => res.json({ status: "ok", server: "leetcode-mcp" }));
 
