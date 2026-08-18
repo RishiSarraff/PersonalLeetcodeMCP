@@ -155,6 +155,105 @@ const PROBLEMSET_QUERY_V2 = `
   }
 `;
 
+// contains get_similar_problems information, so doesn't need extra query.
+const QUESTION_DETAIL_QUERY = `
+query questionDetail($titleSlug: String!) {
+  languageList {
+    id
+    name
+  }
+  submittableLanguageList {
+    id
+    name
+    verboseName
+    isCompiledLang
+  }
+  statusList {
+    id
+    name
+  }
+  questionDiscussionTopic(questionSlug: $titleSlug) {
+    id
+    commentCount
+    topLevelCommentCount
+  }
+  ugcArticleOfficialSolutionArticle(questionSlug: $titleSlug) {
+    uuid
+    chargeType
+    canSee
+    hasVideoArticle
+  }
+  question(titleSlug: $titleSlug) {
+    title
+    titleSlug
+    questionId
+    questionFrontendId
+    questionTitle
+    translatedTitle
+    content
+    translatedContent
+    categoryTitle
+    difficulty
+    stats
+    companyTagStatsV2
+    topicTags {
+      name
+      slug
+      translatedName
+    }
+    positionLevelTags {
+      name
+      nameTranslated
+      slug
+    }
+    similarQuestionList {
+      difficulty
+      titleSlug
+      title
+      translatedTitle
+      isPaidOnly
+    }
+    mysqlSchemas
+    dataSchemas
+    frontendPreviews
+    likes
+    dislikes
+    isPaidOnly
+    status
+    canSeeQuestion
+    enableTestMode
+    metaData
+    enableRunCode
+    enableSubmit
+    enableDebugger
+    envInfo
+    isLiked
+    nextChallenges {
+      difficulty
+      title
+      titleSlug
+      questionFrontendId
+    }
+    libraryUrl
+    adminUrl
+    hints
+    codeSnippets {
+      code
+      lang
+      langSlug
+    }
+    exampleTestcaseList
+    hasFrontendPreview
+    featuredContests {
+      titleSlug
+      title
+    }
+    aiJudgingAvailable
+  }
+}
+`
+
+
 // ─── Analysis helpers ────────────────────────────────────────────────────────
 
 function analyzeWeakAreas(tagStats) {
@@ -436,6 +535,79 @@ function createMcpServer() {
   );
 
   // Tool: get_problem_details
+  server.tool(
+    "get_problem_details",
+    "Get the full details of a specific LeetCode problem",
+    {
+      titleSlug: z.string().describe("URL slug of the problem (not the display title), e.g. 'two-sum'"),
+    },
+    async ({ titleSlug }) => {
+      const data = await lcQuery(QUESTION_DETAIL_QUERY, { titleSlug });
+      const q = data.question;
+
+      if (!q) {
+        return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      }
+
+      const {
+        title,
+        questionFrontendId,
+        difficulty,
+        topicTags,
+        hints,
+        exampleTestcaseList,
+        isPaidOnly,
+      } = q;
+
+      // ── Clean HTML content ──────────────────────────────────────────────────
+      const entityMap = {
+        "&nbsp;": " ",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&amp;": "&",
+      };
+
+      let cleanedContent = q.content
+        .replace(/<\/p>|<br\s*\/?>|<\/pre>/g, "\n")           // preserve structure first
+        .replace(/<[^>]*>/g, " ")                              // strip remaining tags
+        .replace(/&nbsp;|&lt;|&gt;|&quot;|&amp;/g, (m) => entityMap[m]) // decode entities
+        .replace(/[ \t]+/g, " ")                               // collapse spaces/tabs only
+        .replace(/\n\s*\n+/g, "\n\n")                          // collapse multiple blank lines
+        .trim();
+
+      // ── Parse stats ──────────────────────────────────────────────────────────
+      const stats = JSON.parse(q.stats);
+
+      // ── Build response ──────────────────────────────────────────────────────
+      const lines = [
+        `## ${questionFrontendId}. ${title}${isPaidOnly ? " 🔒" : ""}`,
+        `**Difficulty:** ${difficulty}  |  **Acceptance:** ${stats.acRate} (${stats.totalAccepted}/${stats.totalSubmission})`,
+        "",
+        cleanedContent,
+      ];
+
+      if (topicTags.length > 0) {
+        lines.push("\n### Topic Tags");
+        lines.push(...topicTags.map((t) => `- ${t.name}`));
+      }
+
+      if (exampleTestcaseList && exampleTestcaseList.length > 0) {
+        lines.push("\n### Example Testcases");
+        lines.push("```");
+        lines.push(...exampleTestcaseList);
+        lines.push("```");
+      }
+
+      if (hints && hints.length > 0) {
+        lines.push("\n### Hints");
+        hints.forEach((h, i) => lines.push(`${i + 1}. ${h}`));
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
   // Tool: get_similar_problems
   // Tool: recommend_next_problem
 
