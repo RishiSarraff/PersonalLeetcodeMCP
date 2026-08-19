@@ -282,6 +282,8 @@ const NEXT_CHALLENGES_QUERY = `
 `;
 
 
+
+
 // ─── Analysis helpers ────────────────────────────────────────────────────────
 
 function analyzeWeakAreas(tagStats) {
@@ -332,6 +334,31 @@ function categorizeSubmissions(submissions) {
     .map((p) => p.title);
 
   return { byStatus, byLang, multipleAttempts };
+}
+
+const HTML_ENTITY_MAP = {
+  "&nbsp;": " ",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&amp;": "&",
+}
+
+function cleanHtmlContent(uncleanedContent) {
+  let cleanedContent = uncleanedContent
+    .replace(/<\/p>|<br\s*\/?>|<\/pre>/g, "\n")           // preserve structure first
+    .replace(/<[^>]*>/g, " ")                              // strip remaining tags
+    .replace(/&nbsp;|&lt;|&gt;|&quot;|&amp;/g, (match) => HTML_ENTITY_MAP[match]) // decode entities
+    .replace(/[ \t]+/g, " ")                               // collapse spaces/tabs only
+    .replace(/\n\s*\n+/g, "\n\n")                          // collapse multiple blank lines
+    .trim();
+
+  return cleanedContent;
+} 
+
+function difficulty_based_time_limits(difficulty){
+  const TIME_LIMITS = {EASY: 20, MEDIUM: 30, HARD: 45}
+  return TIME_LIMITS[difficulty]
 }
 
 // ─── MCP Server setup ────────────────────────────────────────────────────────
@@ -585,24 +612,9 @@ function createMcpServer() {
         hints,
         exampleTestcaseList,
         isPaidOnly,
-      } = q;
+      } = q;      
 
-      // ── Clean HTML content ──────────────────────────────────────────────────
-      const entityMap = {
-        "&nbsp;": " ",
-        "&lt;": "<",
-        "&gt;": ">",
-        "&quot;": '"',
-        "&amp;": "&",
-      };
-
-      let cleanedContent = q.content
-        .replace(/<\/p>|<br\s*\/?>|<\/pre>/g, "\n")           // preserve structure first
-        .replace(/<[^>]*>/g, " ")                              // strip remaining tags
-        .replace(/&nbsp;|&lt;|&gt;|&quot;|&amp;/g, (m) => entityMap[m]) // decode entities
-        .replace(/[ \t]+/g, " ")                               // collapse spaces/tabs only
-        .replace(/\n\s*\n+/g, "\n\n")                          // collapse multiple blank lines
-        .trim();
+      const cleanedContent = cleanHtmlContent(q.content)
 
       // ── Parse stats ──────────────────────────────────────────────────────────
       const stats = JSON.parse(q.stats);
@@ -709,12 +721,108 @@ function createMcpServer() {
   // -------------- MOCK INTERVIEW SIMULATION --------------
 
   // Tool: start_mock_interview
-  // Tool: get_contest_history
+  server.tool(
+    "start_mock_interview",
+    "Get a random LeetCode problem matching a difficulty and/or topic, framed as a timed mock interview",
+    {
+      difficulty: z.enum(["EASY", "MEDIUM", "HARD"]).optional().describe('Level/Range of Interview Question Difficulty'),
+      tag: z.string().optional().describe('Topic Tag Slug'),
+      companies: z.array(z.string()).optional().describe(
+        "Company slugs to target, e.g ['amazon', 'google']. Verify exact slugs via Leetcode's company filter"
+      )
+    },
+    async ({ difficulty, tag, companies }) => {
+      if(!difficulty && !tag && (!companies || companies.length == 0)){
+        // Notify user of missing content 
+        return { content: [{ type: "text", text: "Difficulty, Tag, and/or Company is missing" }] };
+      }
+      
+      const filters = {
+        filterCombineType: "ALL",
+        difficultyFilter: {
+          difficulties: difficulty ? [difficulty] : [],
+          operator: "IS",
+        },
+        topicFilter: {
+          topicSlugs: tag ? [tag] : [],
+          operator: "IS",
+        },
+        companyFilter: companies && companies.length ? {
+          companySlugs: companies, operator: "IS"
+        } : undefined
+      }
+
+      const BATCH_SIZE = 50;
+
+      const data = await lcQuery(PROBLEMSET_QUERY_V2, {
+        categorySlug: "all-code-essentials",
+        skip: 0,
+        limit: BATCH_SIZE,
+        searchKeyword: "",
+        filters,
+        sortBy: { sortField: "CUSTOM", sortOrder: "ASCENDING" },
+      });
+
+      const questions = data.problemsetQuestionListV2.questions
+      if (!questions.length) {
+        return { content: [{ type: "text", text: "No problems found for those filters." }] };
+      }
+
+      // pick a random index from question list and random question
+      const randomIndex = Math.floor(Math.random() * questions.length);
+      const chosenQuestion = questions[randomIndex];
+
+      const chosenQuestionTitleSlug = chosenQuestion.titleSlug
+
+      const questionData = await lcQuery(QUESTION_DETAIL_QUERY, {
+        titleSlug: chosenQuestionTitleSlug
+      })
+
+      const q = questionData.question;
+
+      if(!q){
+        return { content: [{ type: "text", text: "No question found with this title slug." }] };
+      }
+
+      const cleanedQuestionContent = cleanHtmlContent(q.content)
+
+      const timeLimit = difficulty_based_time_limits(q.difficulty.toUpperCase()) || 30;
+
+      const lines = [
+        `## Mock Interview${companies && companies.length ? ` — targeting: ${companies.join(", ")}` : ""}`,
+        `**Recommended time limit:** ${timeLimit} minutes`,
+        "",
+        "**Before you start:** clarify constraints and edge cases out loud, talk through your approach before writing code, and state time/space complexity before you submit.",
+        "",
+        `### ${q.questionFrontendId}. ${q.title}${q.isPaidOnly ? " 🔒" : ""}`,
+        `**Difficulty:** ${q.difficulty}`,
+        "",
+        cleanedQuestionContent,
+      ];
+
+      if (q.topicTags.length > 0) {
+        lines.push("\n### Topic Tags");
+        lines.push(...q.topicTags.map((t) => `- ${t.name}`));
+      }
+
+      if (q.exampleTestcaseList && q.exampleTestcaseList.length > 0) {
+        lines.push("\n### Example Testcases");
+        lines.push("```");
+        lines.push(...q.exampleTestcaseList);
+        lines.push("```");
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
 
   // -------------- PROGRESS TRACKING WITH REAL MEMORY --------------
 
   // Tool: log_attempt
+
+
   // Tool: get_due_for_review
+
 
   // -------------- DEEPER ANALYSIS --------------
   // Tool: compare_topic_coverage
