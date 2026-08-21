@@ -3,7 +3,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express from "express";
 import { z } from "zod";
 import "dotenv/config";
+import { Redis } from '@upstash/redis'
+const redis = new Redis({ 
+  url: process.env.UPSTASH_REDIS_REST_URL, 
+  token: process.env.UPSTASH_REDIS_REST_TOKEN
+});
 
+const redis_url = redis.url
+const redis_token = redis.token;
 
 const LEETCODE_GRAPHQL = "https://leetcode.com/graphql";
 
@@ -383,6 +390,34 @@ const EXPLORE_TAGS = [
   "Doubly-Linked List", "Monotonic Queue", "Quickselect",
   "Lowest Common Ancestor", "Design", "Concurrency", "Database",
 ];
+
+const BOX_INTERVALS_DAYS = [1, 2, 4, 7, 14, 30]; 
+const OUTCOMES = ["FAILED", "STRUGGLED", "SOLVED_WITH_HELP", "SOLVED_CONFIDENT"]
+
+function computeNextBox(currentBox, outcome){
+  switch(outcome){
+    case "FAILED":
+      return 0
+    case "STRUGGLED":
+      return 1
+    case "SOLVED_WITH_HELP":
+      return 2
+    case "SOLVED_CONFIDENT":
+      // if the first time we solved this confidently, then we start at 3
+      // if this not the first time, we climb up one
+      return currentBox == null ? 3 : Math.min(currentBox+1, 5);
+      // if we already mastered, we dont want to go beyond 5, keep range same as index of outcomes array
+    default:
+      throw new Error(`Unknown outcome: ${outcome}`)
+  }
+}
+
+function computeNextReviewDue(box){
+  const days = BOX_INTERVALS_DAYS[box]
+  const due = new Date()
+  due.setDate(due.getDate()+days)
+  return due.toISOString()
+}
 
 // ─── MCP Server setup ────────────────────────────────────────────────────────
 
@@ -840,11 +875,94 @@ function createMcpServer() {
   );
 
   // -------------- PROGRESS TRACKING WITH REAL MEMORY --------------
-
+  // We connect to Redis Uptash here
   // Tool: log_attempt
+  server.tool(
+    "log_attempt",
+    "Log an attempt at a LeetCode problem, updating its spaced-repetition schedule",
+    {
+      username: z.string().describe("Leetcode username, used as the storage namespace"),
+      titleSlug: z.string().describe("Problem's URL slug. i.e. 'two-sum'"),
+      title: z.string().describe("Problem's Display Title"),
+      difficulty: z.enum(["EASY", "MEDIUM", "HARD"]),
+      tags: z.array(z.string()).optional().describe("Topic Tags for this problem"),
+      outcome: z.enum(OUTCOMES).describe("What happened in this attempt"),
+      notes: z.string().optional().describe("What you got stuck on, or anything worth remembering next time")
+    },
+    async({username, titleSlug, title, difficulty, tags, outcome, notes}) => {
+      const recordKey = `user:${username}:problem:${titleSlug}`;
+      const queueKey = `user:${username}:review_queue`
 
+      // read the existing record — may be null if this is the first attempt
+      const existingRecord = await redis.get(recordKey);
+
+      // compute the new box
+      const currentBox = existingRecord ? existingRecord.box : null
+      const newBox = computeNextBox(currentBox, outcome);
+
+      // compute the new due date
+      const nextReviewDue = computeNextReviewDue(newBox);
+
+      // Build the updated record object
+      //   - spread existing history if present, append a new entry
+      //   - increment attemptCount
+      //   - set title/difficulty/tags/box/lastOutcome/lastReviewed/nextReviewDue
+      const now = new Date().toISOString();
+
+      const updatedRecord = {
+        title,
+        titleSlug,
+        difficulty,
+        tags,
+        box:newBox,
+        attemptCount: existingRecord ? existingRecord.attemptCount + 1 : 1,
+        lastOutcome: outcome,
+        lastReviewed:  now,
+        nextReviewDue: nextReviewDue,
+        history:[
+          ...(existingRecord?.history || []),
+          { timestamp: now, outcome, notes: notes || null }
+        ]
+      }
+
+      // atomic write — both keys together
+
+      // redis stores due dates as a unix timestamp in seconds
+      const redisTimestamp = Math.floor(new Date(nextReviewDue).getTime() / 1000); 
+
+      // uptash handles serialization of updatedRecord JS object, no need to worry about JSON.parse
+      await redis.multi()
+        .set(recordKey, updatedRecord)
+        .zadd(queueKey, {
+          score: redisTimestamp,
+          member: titleSlug
+        })
+        .exec();
+
+      // build a confirmation message
+      const lines = [
+        `Logged attempt for **${title}**`,
+        `Outcome: ${outcome}`,
+        `Box: ${newBox} → next review on **${readableDate}**`,
+        notes ? `Notes: ${notes}` : null,
+      ].filter(Boolean); // drops the null entry if no notes were given
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  )
 
   // Tool: get_due_for_review
+  server.tool(
+    "get_due_for_reviews",
+    "",
+    {
+
+    },
+    async({}) => {
+
+      // return content here
+    }
+  )
 
 
   // -------------- DEEPER ANALYSIS --------------
