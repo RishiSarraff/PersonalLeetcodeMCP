@@ -9,9 +9,6 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN
 });
 
-const redis_url = redis.url
-const redis_token = redis.token;
-
 const LEETCODE_GRAPHQL = "https://leetcode.com/graphql";
 
 const csrftoken = process.env.CSRF_TOKEN;
@@ -392,7 +389,10 @@ const EXPLORE_TAGS = [
 ];
 
 const BOX_INTERVALS_DAYS = [1, 2, 4, 7, 14, 30]; 
-const OUTCOMES = ["FAILED", "STRUGGLED", "SOLVED_WITH_HELP", "SOLVED_CONFIDENT"]
+const OUTCOMES = ["FAILED", "STRUGGLED", "SOLVED_WITH_HELP", "SOLVED_CONFIDENT"];
+
+const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
 
 function computeNextBox(currentBox, outcome){
   switch(outcome){
@@ -405,7 +405,7 @@ function computeNextBox(currentBox, outcome){
     case "SOLVED_CONFIDENT":
       // if the first time we solved this confidently, then we start at 3
       // if this not the first time, we climb up one
-      return currentBox == null ? 3 : Math.min(currentBox+1, 5);
+      return currentBox === null ? 3 : Math.min(currentBox+1, 5);
       // if we already mastered, we dont want to go beyond 5, keep range same as index of outcomes array
     default:
       throw new Error(`Unknown outcome: ${outcome}`)
@@ -418,6 +418,17 @@ function computeNextReviewDue(box){
   due.setDate(due.getDate()+days)
   return due.toISOString()
 }
+
+function convertToUnixTimestamp(isoString){
+  return Math.floor(new Date(isoString).getTime() / 1000);
+}
+
+function daysOverdue(nextReviewDue) {
+  const dueSeconds = convertToUnixTimestamp(nextReviewDue);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return Math.floor((nowSeconds - dueSeconds) / 86400);
+}
+
 
 // ─── MCP Server setup ────────────────────────────────────────────────────────
 
@@ -723,7 +734,7 @@ function createMcpServer() {
 
       const similarQuestionList = q.similarQuestionList
 
-      if(similarQuestionList.length == 0){
+      if(similarQuestionList.length === 0){
         // no similar questions we return a no result
         return { content: [{ type: "text", text: `No Similar questions found for "${titleSlug}".`}] };
       }
@@ -758,7 +769,7 @@ function createMcpServer() {
 
       const nextChallengesList = q.nextChallenges
 
-      if(nextChallengesList.length == 0){
+      if(nextChallengesList.length === 0){
         // no similar questions we return a no result
         return { content: [{ type: "text", text: `No Next Challenges were found for "${titleSlug}".`}] };
       }
@@ -790,7 +801,7 @@ function createMcpServer() {
       )
     },
     async ({ difficulty, tag, companies }) => {
-      if(!difficulty && !tag && (!companies || companies.length == 0)){
+      if(!difficulty && !tag && (!companies || companies.length === 0)){
         // Notify user of missing content 
         return { content: [{ type: "text", text: "Difficulty, Tag, and/or Company is missing" }] };
       }
@@ -925,10 +936,9 @@ function createMcpServer() {
         ]
       }
 
-      // atomic write — both keys together
-
+      // atomic write: both keys together
       // redis stores due dates as a unix timestamp in seconds
-      const redisTimestamp = Math.floor(new Date(nextReviewDue).getTime() / 1000); 
+      const redisTimestamp = convertToUnixTimestamp(nextReviewDue);
 
       // uptash handles serialization of updatedRecord JS object, no need to worry about JSON.parse
       await redis.multi()
@@ -938,6 +948,13 @@ function createMcpServer() {
           member: titleSlug
         })
         .exec();
+
+      // lets build a readable date:
+      const readableDate = new Date(nextReviewDue).toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric"
+      })
 
       // build a confirmation message
       const lines = [
@@ -951,18 +968,148 @@ function createMcpServer() {
     }
   )
 
-  // Tool: get_due_for_review
-  server.tool(
-    "get_due_for_reviews",
-    "",
+    server.tool(
+    "get_due_for_review",
+    "Get LeetCode problems due for spaced-repetition review, split into overdue and due today",
     {
-
+      username: z.string().describe("LeetCode username, used as the storage namespace"),
     },
-    async({}) => {
+    async ({ username }) => {
+      const queueKey = `user:${username}:review_queue`;
+      const nowSeconds = Math.floor(Date.now() / 1000);
 
-      // return content here
+      // compute start-of-today as a unix timestamp (seconds) —
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      const startOfTodaySecond = Math.floor(startOfToday.getTime()/1000);
+
+      // ZRANGEBYSCORE — get every titleSlug due at or before right now
+      const dueSlugs = await redis.zrange(queueKey, 0, nowSeconds, {byScore: true});
+
+      // guard
+      if(dueSlugs.length === 0){
+        return { content: [{ type: "text", text: "Nothing is due right now!"}] };
+      }
+
+      // grab the batch of titleSlugs(identifiers) of all due problems
+      const keysToFetch = dueSlugs.map((titleSlug) => `user:${username}:problem:${titleSlug}`)
+      const recordsFetched = await redis.mget(...keysToFetch);
+      // get those exact records from redis using the titleSlug.
+
+      // split records into two buckets by comparing each record's  
+      // everything that is less than start of today should be overdue
+      // everything that is >= is due today
+      const overdueSlugs = recordsFetched.filter(record => convertToUnixTimestamp(record.nextReviewDue) < startOfTodaySecond);
+      const currentlyDueSlugs = recordsFetched.filter(record => convertToUnixTimestamp(record.nextReviewDue) >= startOfTodaySecond);
+
+      // sort our overdue slugs based on the worst overdue
+      overdueSlugs.sort((a, b) => {
+        const daysA = daysOverdue(a.nextReviewDue);
+        const daysB = daysOverdue(b.nextReviewDue);
+        if(daysA != daysB){
+          // return the smaller dau
+          return daysA - daysB;
+        }
+        // return the seconds difference
+        return convertToUnixTimestamp(a.nextReviewDue) - convertToUnixTimestamp(b.nextReviewDue);
+      })
+
+      // build lines[]
+      const lines = [`## Review Queue for @${username}`];
+
+      if (overdueSlugs.length > 0) {
+        lines.push(`\n**${overdueSlugs.length} overdue**`);
+        for (const record of overdueSlugs) {
+          const days = daysOverdue(record.nextReviewDue);
+          lines.push(`- ${record.title} (box ${record.box}) — ${days} day${days === 1 ? "" : "s"} overdue`);
+        }
+      }
+
+      if (currentlyDueSlugs.length > 0) {
+        lines.push(`\n**${currentlyDueSlugs.length} due today**`);
+        for (const record of currentlyDueSlugs) {
+          lines.push(`- ${record.title} (box ${record.box})`);
+        }
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
-  )
+  );
+
+  // -------------- PROGRESS TRACKING WITH REAL MEMORY --------------
+  server.tool(
+    "set_review_intensity",
+    "Configure how often Tether checks in with you and on which days",
+    {
+      username: z.string().describe("LeetCode username, used as the storage namespace"),
+      intensity: z.enum(["GRIND", "MODERATE", "BUSY", "MINIMAL"]).describe(
+        "GRIND = every day, MODERATE = 3-4 days/week, BUSY = 2 days/week, MINIMAL = Sunday only"
+      ),
+      activeDays: z.array(z.enum(DAYS)).optional().describe(
+        "Required for MODERATE (3-4 days) and BUSY (exactly 2 days). Ignored for GRIND and MINIMAL."
+      ),
+      phoneNumber: z.string().optional().describe(
+        "E.164 format, e.g. +15551234567. Only needed the first time, or to change it."
+      ),
+    },
+    async ({ username, intensity, activeDays, phoneNumber }) => {
+      // runtime validation based on intensity
+      const settingsKey = `user:${username}:settings`;
+      if(intensity === 'MODERATE'){
+        // let the active days be chosen
+        if (!activeDays || (activeDays.length !== 3 && activeDays.length !== 4)) {
+          return {
+            content: [{ type: "text", text: "MODERATE intensity needs exactly 3 or 4 active days." }],
+          };
+        }
+      }
+      else if(intensity === 'BUSY'){
+        // let active days be chosen
+        if (!activeDays || (activeDays.length !== 2)) {
+          return {
+            content: [{ type: "text", text: "BUSY intensity needs exactly 2 active days." }],
+          };
+        }
+      }
+      // we don't read grind or minimal:
+      // why? --> Because activeDays is ignore even if it can be passed since we know its every day or 1 day a week
+      
+      // Read existing settings
+      const existingSettings = await redis.get(settingsKey);
+
+      const resolvedPhoneNumber = phoneNumber || existingSettings?.phoneNumber;
+
+      if (!resolvedPhoneNumber) {
+        return {
+          content: [{ type: "text", text: "No phone number on file — please provide one the first time you set your intensity." }],
+        };
+      }
+
+      const updatedSettings = {
+        intensity,
+        activeDays: intensity === "GRIND" || intensity === "MINIMAL" ? null : activeDays,
+        phoneNumber: resolvedPhoneNumber
+      }
+
+      await redis.set(settingsKey, updatedSettings)
+  
+      // Build a confirmation message summarizing what was just set
+      const dayLabel = updatedSettings.activeDays
+      ? updatedSettings.activeDays.join(", ")
+      : intensity === "GRIND"
+        ? "every day"
+        : "Sundays only";
+    
+      const lines = [
+        `Tether intensity set to **${intensity}**`,
+        `Check-in days: ${dayLabel}`,
+        `Phone on file: ${resolvedPhoneNumber}`,
+        `Note: every tier also gets the weekly Sunday digest, regardless of intensity.`,
+      ];
+    
+      return { content: [{ type: "text", text: lines.join("\n") }] };  
+    }
+  );  
 
 
   // -------------- DEEPER ANALYSIS --------------
