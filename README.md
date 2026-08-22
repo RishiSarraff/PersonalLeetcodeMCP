@@ -1,87 +1,64 @@
-# LeetCode MCP Connector for Claude.ai
+# Tether — LeetCode MCP + Spaced Repetition Coach
 
-A remote MCP server that gives Claude access to your LeetCode submission history and weak area analysis.
+A remote MCP server that connects Claude to your LeetCode data, tracks your
+practice with a spaced-repetition system, and (optionally) sends scheduled
+check-in texts so you actually keep up with review.
 
 ## Tools provided
 
 | Tool | Description |
-|------|-------------|
-| `get_submission_history` | Recent submissions with status, language, and multi-attempt detection |
-| `analyze_weak_areas` | Topic-by-topic breakdown of weakest vs strongest areas with recommendations |
-| `get_user_stats` | Overall accepted/submission counts, streaks, and ranking percentile |
+|---|---|
+| `get_submission_history` | Recent submissions with status, language, multi-attempt detection |
+| `analyze_weak_areas` | Topic-by-topic weak vs. strong breakdown |
+| `get_user_stats` | Accepted/submission counts, streaks, ranking percentile |
 | `get_daily_challenge` | Today's daily challenge problem |
+| `search_problems_by_topic` | Filter problems by tag and/or difficulty |
+| `get_problem_details` | Full statement, constraints, hints, examples for one problem |
+| `get_similar_problems` | Problems LeetCode tags as related |
+| `recommend_next_problem` | LeetCode's own "what to try next" suggestions |
+| `start_mock_interview` | Random problem by difficulty/topic/company, framed as a timed interview |
+| `log_attempt` | Record an attempt's outcome, updating its review schedule |
+| `get_due_for_review` | What's due or overdue for spaced-repetition review |
+| `set_review_intensity` | Configure check-in frequency (GRIND / MODERATE / BUSY / MINIMAL) and phone number |
+| `compare_topic_coverage` | Your tag coverage vs. core FAANG interview topics |
 
 ## Setup
 
-### 1. Install & run locally
+### 1. Environment variables
 
-```bash
+UPSTASH_REDIS_REST_URL=
+UPSTASH_REDIS_REST_TOKEN=
+LEETCODE_SESSION= # your LeetCode session cookie, for Premium-gated data
+CSRF_TOKEN= # your LeetCode csrftoken cookie
+DAILY_CHECK_SECRET= # shared secret protecting /internal/daily-check
+TETHER_USERNAME= # your LeetCode username (solo-phase, hardcoded)
+
+### 2. Local development
 npm install
+npm run build
 npm start
-# → Listening on http://localhost:3000
-```
 
-### 2. Deploy (required for Claude.ai)
 
-Claude.ai requires a **publicly accessible HTTPS URL**. Choose one:
+### 3. Deploy (required for Claude.ai)
 
-#### Option A — Railway (easiest, free tier)
-1. Push this folder to a GitHub repo
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Railway auto-detects Node.js and gives you a public URL like `https://leetcode-mcp-xxx.railway.app`
+Push to GitHub, then deploy on [Render](https://render.com):
+- **Runtime:** Docker (Dockerfile is included)
+- Add all env vars above under the Environment tab
 
-#### Option B — Render
-1. Push to GitHub
-2. [render.com](https://render.com) → New Web Service → connect repo
-3. Build: `npm install`, Start: `node server.js`
-4. Gets a URL like `https://leetcode-mcp.onrender.com`
+### 4. Add to Claude.ai
 
-#### Option C — Docker (any VPS/cloud)
-```bash
-docker build -t leetcode-mcp .
-docker run -p 3000:3000 leetcode-mcp
-# Then point a domain + SSL at port 3000
-```
+**Settings → Connectors → Add custom connector** → enter
+`https://your-deployment-url.com/mcp`
 
-#### Option D — Cloudflare Workers (advanced)
-Cloudflare has built-in MCP support. See: https://developers.cloudflare.com/mcp/
+### 5. Set up the daily check-in cron (optional)
 
-### 3. Add to Claude.ai
-
-Once deployed:
-1. Go to **Claude.ai → Settings → Connectors**
-2. Click **"Add custom connector"**
-3. Enter your server URL: `https://your-deployment-url.com/mcp`
-4. Click **Add**
-
-That's it — Claude will now have access to the LeetCode tools.
-
-## Example prompts
-
-After connecting, try asking Claude:
-
-- *"Analyze my weak areas on LeetCode — my username is @john_doe"*
-- *"Show me my last 20 submissions and tell me which problems I struggled with"*
-- *"What are my LeetCode stats and what should I focus on next?"*
-- *"What's today's daily challenge?"*
+Using a free service like [cron-job.org](https://cron-job.org), schedule a
+daily `POST` to `https://your-deployment-url.com/internal/daily-check` with
+header `x-daily-check-secret: <your DAILY_CHECK_SECRET>`.
 
 ## Notes on LeetCode's API
 
-- **Public data**: `get_submission_history`, `get_user_stats`, `analyze_weak_areas`, and `get_daily_challenge` all work with public profile data — no login required, as long as the target profile is public.
-- **Private profiles**: If a user has a private profile, LeetCode will return empty data. The user must set their profile to public in LeetCode Settings → Privacy.
-- LeetCode does not have an official public API. This server uses the same GraphQL endpoint that LeetCode's own frontend uses. It may break if LeetCode changes their API structure.
-
-## Extending this server
-
-To add more tools, follow the pattern in `server.js`:
-```js
-server.tool("tool_name", "description", { param: z.string() }, async ({ param }) => {
-  // call lcQuery() and return results
-  return { content: [{ type: "text", text: "..." }] };
-});
-```
-
-Useful queries to add:
-- Problem search by tag/difficulty (uses `problemsetQuestionList` query)
-- Company-tagged problems (requires LeetCode Premium session cookie)
-- Contest history (query is already in the file as `CONTEST_HISTORY_QUERY`)
+LeetCode has no official public API. This server uses the same GraphQL
+endpoint LeetCode's own frontend uses — it may break if LeetCode changes
+their API structure. Authenticated queries (Premium data, company tags)
+require a valid `LEETCODE_SESSION` + `CSRF_TOKEN` pair from your browser.

@@ -1,0 +1,552 @@
+// src/server.ts
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
+import { z } from "zod";
+import "dotenv/config";
+import { getProblemRecord, setProblemRecord, getUserSettings, setUserSettings, getDueTitleSlugs, getProblemRecordsBatch, } from "./redis.js";
+import { lcQuery, SUBMISSION_HISTORY_QUERY, USER_STATS_QUERY, PROBLEM_TAGS_QUERY, DAILY_CHALLENGE_QUERY, PROBLEMSET_QUERY_V2, QUESTION_DETAIL_QUERY, SIMILAR_QUESTIONS_QUERY, NEXT_CHALLENGES_QUERY, } from "./queries.js";
+import { computeNextBox, computeAgedBox, computeNextReviewDue, convertToUnixTimestamp, daysOverdue, cleanHtmlContent, difficultyBasedTimeLimit, coverageStatus, CORE_FAANG_TAGS, EXPLORE_TAGS, analyzeWeakAreas, categorizeSubmissions, } from "./helpers.js";
+import { OUTCOMES, DAYS } from "./types.js";
+// ─── Fail-fast startup check ─────────────────────────────────────────────────
+// Better than scattering `!` assertions everywhere and hoping — if something
+// required is missing, the server refuses to boot, with a clear reason why,
+// instead of crashing mysteriously on the third tool call someone makes.
+const REQUIRED_ENV_VARS = [
+    "UPSTASH_REDIS_REST_URL",
+    "UPSTASH_REDIS_REST_TOKEN",
+    "LEETCODE_SESSION",
+    "CSRF_TOKEN",
+    "DAILY_CHECK_SECRET",
+];
+for (const key of REQUIRED_ENV_VARS) {
+    if (!process.env[key]) {
+        console.error(`❌ Missing required env var: ${key}`);
+        process.exit(1);
+    }
+}
+// ─── MCP Server setup ────────────────────────────────────────────────────────
+function createMcpServer() {
+    const server = new McpServer({ name: "tether-connector", version: "1.0.0" });
+    server.tool("get_submission_history", "Fetch recent submission history for a LeetCode user", {
+        username: z.string().describe("LeetCode username"),
+        limit: z.number().int().min(1).max(50).default(20),
+    }, async ({ username, limit }) => {
+        const data = await lcQuery(SUBMISSION_HISTORY_QUERY, {
+            username,
+            limit,
+        });
+        const subs = data.recentSubmissionList;
+        if (!subs || subs.length === 0) {
+            return { content: [{ type: "text", text: `No submissions found for user "${username}".` }] };
+        }
+        const { byStatus, byLang, multipleAttempts } = categorizeSubmissions(subs);
+        const lines = [
+            `## Submission History for @${username}`,
+            `Showing last ${subs.length} submissions\n`,
+            "### Status Breakdown",
+            ...Object.entries(byStatus).map(([s, n]) => `- ${s}: ${n}`),
+            "\n### Language Usage",
+            ...Object.entries(byLang).map(([l, n]) => `- ${l}: ${n}`),
+        ];
+        if (multipleAttempts.length > 0) {
+            lines.push("\n### Problems with Multiple Failed Attempts");
+            lines.push(...multipleAttempts.map((t) => `- ${t}`));
+        }
+        lines.push("\n### Recent Submissions");
+        for (const s of subs.slice(0, 10)) {
+            const date = new Date(parseInt(s.timestamp) * 1000).toLocaleDateString();
+            lines.push(`- [${s.statusDisplay}] ${s.title} (${s.lang}) — ${date}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("analyze_weak_areas", "Analyze a LeetCode user's weak topic areas and provide recommendations", { username: z.string().describe("LeetCode username") }, async ({ username }) => {
+        const [tagData, statsData] = await Promise.all([
+            lcQuery(PROBLEM_TAGS_QUERY, { username }),
+            lcQuery(USER_STATS_QUERY, { username }),
+        ]);
+        const user = tagData.matchedUser;
+        if (!user)
+            return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+        const { weak, strong } = analyzeWeakAreas(user.tagProblemCounts);
+        const stats = statsData.matchedUser?.submitStats?.acSubmissionNum || [];
+        const calendar = statsData.matchedUser?.userCalendar;
+        const lines = [
+            `## Weak Area Analysis for @${username}\n`,
+            "### Overall Progress",
+            ...stats.map((s) => `- **${s.difficulty}**: ${s.count} solved (${s.submissions} total submissions)`),
+        ];
+        if (calendar) {
+            lines.push(`- 🔥 Current streak: ${calendar.streak} days`);
+            lines.push(`- 📅 Total active days: ${calendar.totalActiveDays}`);
+        }
+        lines.push("\n### 🔴 Weak Areas (least solved topics)", ...weak.map((t) => `- **${t.tag}**: ${t.solved} problems solved`), "\n### 🟢 Strongest Topics", ...strong.map((t) => `- **${t.tag}**: ${t.solved} problems solved`));
+        lines.push("\n### 📚 Recommended Focus Areas");
+        for (const t of weak.slice(0, 3)) {
+            lines.push(`- **${t.tag}**: Practice 3–5 Easy problems, then 2–3 Medium problems to build intuition.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("get_user_stats", "Get overall stats and progress for a LeetCode user", { username: z.string().describe("LeetCode username") }, async ({ username }) => {
+        const data = await lcQuery(USER_STATS_QUERY, { username });
+        const user = data.matchedUser;
+        if (!user)
+            return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+        const stats = user.submitStats?.acSubmissionNum || [];
+        const beats = user.problemsSolvedBeatsStats || [];
+        const calendar = user.userCalendar;
+        const lines = [
+            `## Stats for @${username}\n`,
+            "### Problems Solved",
+            ...stats.map((s) => `- **${s.difficulty}**: ${s.count} accepted / ${s.submissions} submissions (${s.submissions > 0 ? Math.round((s.count / s.submissions) * 100) : 0}% acceptance)`),
+        ];
+        if (beats.length > 0) {
+            lines.push("\n### Beats (better than X% of users)");
+            lines.push(...beats.map((b) => `- ${b.difficulty}: top ${(100 - b.percentage).toFixed(1)}%`));
+        }
+        if (calendar) {
+            lines.push(`\n### Activity`, `- 🔥 Streak: ${calendar.streak} days`, `- 📅 Total active days: ${calendar.totalActiveDays}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("get_daily_challenge", "Get today's LeetCode Daily Challenge problem", {}, async () => {
+        const data = await lcQuery(DAILY_CHALLENGE_QUERY);
+        const q = data.activeDailyCodingChallengeQuestion;
+        if (!q)
+            return { content: [{ type: "text", text: "Could not fetch daily challenge." }] };
+        const tags = q.question.topicTags.map((t) => t.name).join(", ");
+        const text = [
+            `## 📅 Daily Challenge — ${q.date}`,
+            `**${q.question.title}**`,
+            `Difficulty: ${q.question.difficulty}`,
+            `Acceptance Rate: ${q.question.acRate.toFixed(1)}%`,
+            `Topics: ${tags}`,
+            `Link: https://leetcode.com${q.link}`,
+        ].join("\n");
+        return { content: [{ type: "text", text }] };
+    });
+    server.tool("search_problems_by_topic", "Search LeetCode problems by topic tag and/or difficulty", {
+        tag: z.string().optional().describe("Topic tag slug, e.g. 'union-find'"),
+        difficulty: z.enum(["EASY", "MEDIUM", "HARD"]).optional(),
+        limit: z.number().int().min(1).max(50).default(15),
+        excludePremium: z.boolean().default(false),
+    }, async ({ tag, difficulty, limit, excludePremium }) => {
+        const filters = {
+            filterCombineType: "ALL",
+            difficultyFilter: { difficulties: difficulty ? [difficulty] : [], operator: "IS" },
+            topicFilter: { topicSlugs: tag ? [tag] : [], operator: "IS" },
+        };
+        const data = await lcQuery(PROBLEMSET_QUERY_V2, {
+            categorySlug: "all-code-essentials",
+            skip: 0,
+            limit,
+            searchKeyword: "",
+            filters,
+            sortBy: { sortField: "CUSTOM", sortOrder: "ASCENDING" },
+        });
+        let questions = data.problemsetQuestionListV2.questions;
+        if (excludePremium)
+            questions = questions.filter((q) => !q.paidOnly);
+        if (!questions.length)
+            return { content: [{ type: "text", text: "No problems found for those filters." }] };
+        const lines = [`## Problems${tag ? ` — ${tag}` : ""}${difficulty ? ` (${difficulty})` : ""}\n`];
+        for (const q of questions) {
+            lines.push(`- **${q.questionFrontendId}. ${q.title}**${q.paidOnly ? " 🔒" : ""} (${q.difficulty}) — ${q.acRate.toFixed(1)}% acceptance${q.frequency ? `, freq: ${q.frequency.toFixed(1)}` : ""}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("get_problem_details", "Get the full details of a specific LeetCode problem", { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") }, async ({ titleSlug }) => {
+        const data = await lcQuery(QUESTION_DETAIL_QUERY, { titleSlug });
+        const q = data.question;
+        if (!q)
+            return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+        const cleanedContent = cleanHtmlContent(q.content);
+        const stats = JSON.parse(q.stats);
+        const lines = [
+            `## ${q.questionFrontendId}. ${q.title}${q.isPaidOnly ? " 🔒" : ""}`,
+            `**Difficulty:** ${q.difficulty}  |  **Acceptance:** ${stats.acRate} (${stats.totalAccepted}/${stats.totalSubmission})`,
+            "",
+            cleanedContent,
+        ];
+        if (q.topicTags.length > 0) {
+            lines.push("\n### Topic Tags", ...q.topicTags.map((t) => `- ${t.name}`));
+        }
+        if (q.exampleTestcaseList?.length > 0) {
+            lines.push("\n### Example Testcases", "```", ...q.exampleTestcaseList, "```");
+        }
+        if (q.hints?.length > 0) {
+            lines.push("\n### Hints", ...q.hints.map((h, i) => `${i + 1}. ${h}`));
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("get_similar_problems", "Get similar problems for a specific LeetCode problem", { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") }, async ({ titleSlug }) => {
+        const data = await lcQuery(SIMILAR_QUESTIONS_QUERY, { titleSlug });
+        const q = data.question;
+        if (!q)
+            return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+        if (q.similarQuestionList.length === 0) {
+            return { content: [{ type: "text", text: `No similar questions found for "${titleSlug}".` }] };
+        }
+        const lines = [`Similar Problems for ${q.title}:\n`];
+        for (const sq of q.similarQuestionList) {
+            lines.push(`- **${sq.title}**${sq.isPaidOnly ? " 🔒" : ""} (${sq.difficulty})`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("recommend_next_problem", "LeetCode's suggested next challenges after a specific problem", { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") }, async ({ titleSlug }) => {
+        const data = await lcQuery(NEXT_CHALLENGES_QUERY, { titleSlug });
+        const q = data.question;
+        if (!q)
+            return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+        if (q.nextChallenges.length === 0) {
+            return { content: [{ type: "text", text: `No next challenges found for "${titleSlug}".` }] };
+        }
+        const lines = [`Next Challenges for ${q.title}:\n`];
+        for (const nc of q.nextChallenges) {
+            lines.push(`- **LC ${nc.questionFrontendId}: ${nc.title}** (${nc.difficulty})`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("start_mock_interview", "Get a random LeetCode problem matching a difficulty, topic, and/or company, framed as a mock interview", {
+        difficulty: z.enum(["EASY", "MEDIUM", "HARD"]).optional(),
+        tag: z.string().optional(),
+        companies: z.array(z.string()).optional(),
+    }, async ({ difficulty, tag, companies }) => {
+        if (!difficulty && !tag && (!companies || companies.length === 0)) {
+            return { content: [{ type: "text", text: "Please provide at least a difficulty, tag, or company." }] };
+        }
+        const filters = {
+            filterCombineType: "ALL",
+            difficultyFilter: { difficulties: difficulty ? [difficulty] : [], operator: "IS" },
+            topicFilter: { topicSlugs: tag ? [tag] : [], operator: "IS" },
+            companyFilter: companies?.length ? { companySlugs: companies, operator: "IS" } : undefined,
+        };
+        const data = await lcQuery(PROBLEMSET_QUERY_V2, {
+            categorySlug: "all-code-essentials",
+            skip: 0,
+            limit: 50,
+            searchKeyword: "",
+            filters,
+            sortBy: { sortField: "CUSTOM", sortOrder: "ASCENDING" },
+        });
+        const questions = data.problemsetQuestionListV2.questions;
+        if (!questions.length)
+            return { content: [{ type: "text", text: "No problems found for those filters." }] };
+        const chosen = questions[Math.floor(Math.random() * questions.length)];
+        const detailData = await lcQuery(QUESTION_DETAIL_QUERY, {
+            titleSlug: chosen.titleSlug,
+        });
+        const q = detailData.question;
+        if (!q)
+            return { content: [{ type: "text", text: "Selected a problem but couldn't load its details." }] };
+        const cleanedContent = cleanHtmlContent(q.content);
+        const timeLimit = difficultyBasedTimeLimit(q.difficulty) ?? 30;
+        const lines = [
+            `## Mock Interview${companies?.length ? ` — targeting: ${companies.join(", ")}` : ""}`,
+            `**Recommended time limit:** ${timeLimit} minutes`,
+            "",
+            "**Before you start:** clarify constraints and edge cases out loud, talk through your approach before writing code, and state time/space complexity before you submit.",
+            "",
+            `### ${q.questionFrontendId}. ${q.title}${q.isPaidOnly ? " 🔒" : ""}`,
+            `**Difficulty:** ${q.difficulty}`,
+            "",
+            cleanedContent,
+        ];
+        if (q.topicTags.length > 0)
+            lines.push("\n### Topic Tags", ...q.topicTags.map((t) => `- ${t.name}`));
+        if (q.exampleTestcaseList?.length > 0) {
+            lines.push("\n### Example Testcases", "```", ...q.exampleTestcaseList, "```");
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("log_attempt", "Log an attempt at a LeetCode problem, updating its spaced-repetition schedule", {
+        username: z.string(),
+        titleSlug: z.string(),
+        title: z.string(),
+        difficulty: z.enum(["EASY", "MEDIUM", "HARD"]),
+        tags: z.array(z.string()).optional(),
+        outcome: z.enum(OUTCOMES),
+        notes: z.string().optional(),
+    }, async ({ username, titleSlug, title, difficulty, tags, outcome, notes }) => {
+        const existing = await getProblemRecord(username, titleSlug);
+        const currentBox = existing ? existing.box : null;
+        const newBox = computeNextBox(currentBox, outcome);
+        const nextReviewDue = computeNextReviewDue(newBox);
+        const now = new Date().toISOString();
+        const updatedRecord = {
+            title,
+            titleSlug,
+            difficulty,
+            tags: tags ?? [],
+            box: newBox,
+            attemptCount: existing ? existing.attemptCount + 1 : 1,
+            lastOutcome: outcome,
+            lastReviewed: now,
+            nextReviewDue,
+            history: [...(existing?.history ?? []), { timestamp: now, outcome, notes: notes ?? null }],
+        };
+        await setProblemRecord(username, titleSlug, updatedRecord, convertToUnixTimestamp(nextReviewDue));
+        const readableDate = new Date(nextReviewDue).toLocaleDateString("en-US", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+        });
+        const lines = [
+            `Logged attempt for **${title}**`,
+            `Outcome: ${outcome}`,
+            `Box: ${newBox} → next review on **${readableDate}**`,
+            notes ? `Notes: ${notes}` : null,
+        ].filter((l) => l !== null);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("get_due_for_review", "Get LeetCode problems due for spaced-repetition review, split into overdue and due today", { username: z.string() }, async ({ username }) => {
+        const { overdue, dueToday } = await getDueAndOverdue(username);
+        if (overdue.length === 0 && dueToday.length === 0) {
+            return { content: [{ type: "text", text: "Nothing is due right now!" }] };
+        }
+        const lines = [`## Review Queue for @${username}`];
+        if (overdue.length > 0) {
+            lines.push(`\n**${overdue.length} overdue**`);
+            for (const record of overdue) {
+                const days = daysOverdue(record.nextReviewDue);
+                lines.push(`- ${record.title} (box ${record.box}) — ${days} day${days === 1 ? "" : "s"} overdue`);
+            }
+        }
+        if (dueToday.length > 0) {
+            lines.push(`\n**${dueToday.length} due today**`);
+            for (const record of dueToday) {
+                lines.push(`- ${record.title} (box ${record.box})`);
+            }
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("set_review_intensity", "Configure how often Tether checks in with you and on which days", {
+        username: z.string(),
+        intensity: z.enum(["GRIND", "MODERATE", "BUSY", "MINIMAL"]),
+        activeDays: z.array(z.enum(DAYS)).optional(),
+        phoneNumber: z.string().optional(),
+    }, async ({ username, intensity, activeDays, phoneNumber }) => {
+        if (intensity === "MODERATE" && (!activeDays || (activeDays.length !== 3 && activeDays.length !== 4))) {
+            return { content: [{ type: "text", text: "MODERATE intensity needs exactly 3 or 4 active days." }] };
+        }
+        if (intensity === "BUSY" && (!activeDays || activeDays.length !== 2)) {
+            return { content: [{ type: "text", text: "BUSY intensity needs exactly 2 active days." }] };
+        }
+        const existing = await getUserSettings(username);
+        const resolvedPhoneNumber = phoneNumber ?? existing?.phoneNumber;
+        if (!resolvedPhoneNumber) {
+            return { content: [{ type: "text", text: "No phone number on file — please provide one." }] };
+        }
+        const updatedSettings = {
+            username,
+            intensity,
+            activeDays: intensity === "GRIND" || intensity === "MINIMAL" ? null : activeDays,
+            phoneNumber: resolvedPhoneNumber,
+        };
+        await setUserSettings(username, updatedSettings);
+        const dayLabel = updatedSettings.activeDays
+            ? updatedSettings.activeDays.join(", ")
+            : intensity === "GRIND"
+                ? "every day"
+                : "Sundays only";
+        const lines = [
+            `Tether intensity set to **${intensity}**`,
+            `Check-in days: ${dayLabel}`,
+            `Phone on file: ${resolvedPhoneNumber}`,
+            `Note: every tier also gets the weekly Sunday digest.`,
+        ];
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    server.tool("compare_topic_coverage", "Compare a user's LeetCode tag coverage against core FAANG interview topics", { username: z.string() }, async ({ username }) => {
+        const data = await lcQuery(PROBLEM_TAGS_QUERY, { username });
+        const user = data.matchedUser;
+        if (!user)
+            return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+        const allTags = [
+            ...user.tagProblemCounts.advanced,
+            ...user.tagProblemCounts.intermediate,
+            ...user.tagProblemCounts.fundamental,
+        ];
+        const solvedMap = new Map(allTags.map((t) => [t.tagName, t.problemsSolved]));
+        const resultArray = CORE_FAANG_TAGS.map((tag) => {
+            const solved = solvedMap.get(tag) ?? 0;
+            return { tag, solved, status: coverageStatus(solved) };
+        }).sort((a, b) => a.solved - b.solved);
+        const criticalCount = resultArray.filter((r) => r.status.includes("Critical")).length;
+        const lines = [
+            `## Topic Coverage vs. Core FAANG Interview Tags\n`,
+            `**${criticalCount} of ${resultArray.length} core topics are Critical Gaps**\n`,
+            "| Topic | Solved | Status |",
+            "|---|---|---|",
+            ...resultArray.map((r) => `| ${r.tag} | ${r.solved} | ${r.status} |`),
+        ];
+        const exploreArray = EXPLORE_TAGS.map((tag) => ({ tag, solved: solvedMap.get(tag) ?? 0 })).sort((a, b) => a.solved - b.solved);
+        lines.push("\n### Explore Later (situational / company-dependent)", "| Topic | Solved |", "|---|---|", ...exploreArray.map((r) => `| ${r.tag} | ${r.solved} |`));
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    });
+    return server;
+}
+// ─── Shared logic used by both get_due_for_review AND daily_check ───────────
+async function getDueAndOverdue(username) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfTodaySeconds = Math.floor(startOfToday.getTime() / 1000);
+    const dueSlugs = await getDueTitleSlugs(username, nowSeconds);
+    if (dueSlugs.length === 0)
+        return { overdue: [], dueToday: [] };
+    const records = await getProblemRecordsBatch(username, dueSlugs);
+    const validRecords = records.filter((r) => r !== null);
+    const overdue = validRecords
+        .filter((r) => convertToUnixTimestamp(r.nextReviewDue) < startOfTodaySeconds)
+        .sort((a, b) => daysOverdue(b.nextReviewDue) - daysOverdue(a.nextReviewDue));
+    const dueToday = validRecords.filter((r) => convertToUnixTimestamp(r.nextReviewDue) >= startOfTodaySeconds);
+    return { overdue, dueToday };
+}
+// ─── Aging sweep ─────────────────────────────────────────────────────────────
+const AGING_THRESHOLD_DAYS = 3;
+async function runAgingSweep(username) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const cutoff = nowSeconds - AGING_THRESHOLD_DAYS * 86400;
+    const staleSlugs = await getDueTitleSlugs(username, cutoff);
+    if (staleSlugs.length === 0)
+        return;
+    const records = await getProblemRecordsBatch(username, staleSlugs);
+    for (let i = 0; i < staleSlugs.length; i++) {
+        const record = records[i];
+        if (!record)
+            continue;
+        const newBox = computeAgedBox(record.box);
+        const nextReviewDue = computeNextReviewDue(newBox);
+        const now = new Date().toISOString();
+        const updatedRecord = {
+            ...record,
+            box: newBox,
+            nextReviewDue,
+            history: [...record.history, { timestamp: now, outcome: "AUTO_AGED", notes: null }],
+        };
+        await setProblemRecord(username, staleSlugs[i], updatedRecord, convertToUnixTimestamp(nextReviewDue));
+    }
+}
+// ─── Day-of-week check ────────────────────────────────────────────────────────
+const DAY_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+function isActiveToday(settings) {
+    const today = DAY_NAMES[new Date().getDay()];
+    if (settings.intensity === "GRIND")
+        return true;
+    if (settings.intensity === "MINIMAL")
+        return today === "SUN";
+    return settings.activeDays?.includes(today) ?? false;
+}
+// ─── Express app ─────────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json());
+const clients = new Map();
+const authCodes = new Map();
+const tokens = new Map();
+function randomToken(prefix) {
+    return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
+function baseUrl(req) {
+    return process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+}
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    const b = baseUrl(req);
+    res.json({
+        issuer: b,
+        authorization_endpoint: `${b}/oauth/authorize`,
+        token_endpoint: `${b}/oauth/token`,
+        registration_endpoint: `${b}/oauth/register`,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256", "plain"],
+        token_endpoint_auth_methods_supported: ["none"],
+    });
+});
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+    const b = baseUrl(req);
+    res.json({ resource: `${b}/mcp`, authorization_servers: [b] });
+});
+app.post("/oauth/register", (req, res) => {
+    const client_id = randomToken("client");
+    const client = {
+        client_id,
+        client_id_issued_at: Math.floor(Date.now() / 1000),
+        redirect_uris: req.body?.redirect_uris || [],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+    };
+    clients.set(client_id, client);
+    res.status(201).json(client);
+});
+app.get("/oauth/authorize", (req, res) => {
+    const { redirect_uri, state, client_id } = req.query;
+    if (!redirect_uri)
+        return res.status(400).send("Missing redirect_uri");
+    const code = randomToken("code");
+    authCodes.set(code, { client_id: client_id ?? "", redirect_uri, expires: Date.now() + 60_000 });
+    const url = new URL(redirect_uri);
+    url.searchParams.set("code", code);
+    if (state)
+        url.searchParams.set("state", state);
+    res.redirect(url.toString());
+});
+app.post("/oauth/token", express.urlencoded({ extended: true }), (req, res) => {
+    const { code, grant_type } = req.body;
+    if (grant_type !== "authorization_code")
+        return res.status(400).json({ error: "unsupported_grant_type" });
+    const entry = authCodes.get(code);
+    if (!entry || entry.expires < Date.now())
+        return res.status(400).json({ error: "invalid_grant" });
+    authCodes.delete(code);
+    const access_token = randomToken("token");
+    tokens.set(access_token, { client_id: entry.client_id, expires: Date.now() + 3_600_000 });
+    res.json({ access_token, token_type: "Bearer", expires_in: 3600 });
+});
+app.get("/health", (_req, res) => res.json({ status: "ok", server: "tether-connector" }));
+app.post("/mcp", async (req, res) => {
+    const server = createMcpServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+});
+app.get("/mcp", (_req, res) => {
+    res.status(405).json({ error: "Method not allowed. Use POST." });
+});
+// ─── daily_check — plain HTTP route, not an MCP tool ────────────────────────
+app.post("/internal/daily-check", async (req, res) => {
+    const secret = req.headers["x-daily-check-secret"];
+    if (secret !== process.env.DAILY_CHECK_SECRET) {
+        return res.status(401).json({ error: "unauthorized" });
+    }
+    const username = process.env.TETHER_USERNAME; // solo phase — one hardcoded user
+    const settings = await getUserSettings(username);
+    if (!settings) {
+        return res.json({ sent: 0, note: "no settings configured yet" });
+    }
+    await runAgingSweep(username); // every day when this endpoint hit ==> run aging sweep
+    const today = DAY_NAMES[new Date().getDay()];
+    const messages = [];
+    if (isActiveToday(settings)) {
+        const { overdue, dueToday } = await getDueAndOverdue(username);
+        if (overdue.length > 0 || dueToday.length > 0) {
+            const parts = [];
+            if (overdue.length > 0)
+                parts.push(`⚠️ ${overdue.length} overdue`);
+            if (dueToday.length > 0)
+                parts.push(`👀 ${dueToday.length} due today`);
+            messages.push(parts.join(" · "));
+            // TODO: send via Twilio
+        }
+    }
+    if (today === "SUN") {
+        // TODO: query a wider window, build weekly digest, push into messages[]
+    }
+    res.json({ sent: messages.length });
+});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`✅ Tether MCP server running on port ${PORT}`);
+});

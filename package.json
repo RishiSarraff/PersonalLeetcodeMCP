@@ -1,21 +1,22 @@
 {
-  "name": "leetcode-mcp-server",
+  "name": "tether-mcp",
   "version": "1.0.0",
-  "description": "LeetCode MCP connector for Claude.ai — submission history & weak area analysis",
   "type": "module",
-  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "@upstash/redis": "^1.38.2",
-    "dotenv": "^17.4.2",
-    "express": "^4.19.2",
-    "zod": "^3.23.8"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@upstash/redis": "^1.34.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "zod": "^3.23.0"
   },
-  "engines": {
-    "node": ">=18"
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0",
+    "@types/express": "^4.17.0"
   }
 }
