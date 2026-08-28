@@ -15,7 +15,7 @@ import {
   getDueTitleSlugs,
   getProblemRecordsBatch,
   recordKey,
-  queueKey,
+  queueKey
 } from "./redis.js";
 
 import {
@@ -778,8 +778,8 @@ app.post("/internal/daily-check", async (req: Request, res: Response) => {
     const { overdue, dueToday } = await getDueAndOverdue(username);
     if (overdue.length > 0 || dueToday.length > 0) {
       const parts: string[] = [];
-      if (overdue.length > 0) parts.push(`⚠️ ${overdue.length} overdue`);
-      if (dueToday.length > 0) parts.push(`👀 ${dueToday.length} due today`);
+      if (overdue.length > 0) parts.push(`${overdue.length} problems overdue`);
+      if (dueToday.length > 0) parts.push(`${dueToday.length} problems due today`);
       messages.push(parts.join(" · "));
       // TODO: send via Twilio
     }
