@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import "dotenv/config";
-import { randomBytes } from "node:crypto"
+import { randomBytes } from "node:crypto";
 
 import {
   redis,
@@ -1219,14 +1219,14 @@ app.post(
         const existingSettings = await getUserSettings(username);
 
         if (!existingSettings) {
-            // MINIMAL needs no activeDays (see set_review_intensity's validation),
-            // so this is a safe default until the person tunes it via the tool.
-            await setUserSettings(username, {
+          // MINIMAL needs no activeDays (see set_review_intensity's validation),
+          // so this is a safe default until the person tunes it via the tool.
+          await setUserSettings(username, {
             username,
             intensity: "MINIMAL",
             activeDays: null,
             phoneNumber: normalizedPhone,
-            });
+          });
         }
       }
 
@@ -1267,25 +1267,25 @@ app.post(
   express.urlencoded({ extended: true }),
   (req: Request, res: Response) => {
     const { code, grant_type } = req.body;
-    if (grant_type !== "authorization_code"){
+    if (grant_type !== "authorization_code") {
       return res.status(400).json({ error: "unsupported_grant_type" });
     }
 
     const entry = authCodes.get(code);
-    if (!entry || entry.expires < Date.now()){
+    if (!entry || entry.expires < Date.now()) {
       return res.status(400).json({ error: "invalid_grant" });
     }
 
     authCodes.delete(code);
 
     const access_token = randomToken("token");
-    
+
     tokens.set(access_token, {
       client_id: entry.client_id,
       username: entry.username,
       expires: Date.now() + 3_600_000,
     });
-    
+
     res.json({ access_token, token_type: "Bearer", expires_in: 3600 });
   },
 );
