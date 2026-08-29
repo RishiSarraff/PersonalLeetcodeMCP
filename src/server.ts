@@ -15,7 +15,7 @@ import {
   getDueTitleSlugs,
   getProblemRecordsBatch,
   recordKey,
-  queueKey
+  queueKey,
 } from "./redis.js";
 
 import {
@@ -54,7 +54,12 @@ import {
 } from "./helpers.js";
 
 import { OUTCOMES, DAYS, type Outcome, type DayOfWeek } from "./types.js";
-import type { ProblemRecord, HistoryEntry, UserSettings, Difficulty } from "./types.js";
+import type {
+  ProblemRecord,
+  HistoryEntry,
+  UserSettings,
+  Difficulty,
+} from "./types.js";
 
 // ─── Fail-fast startup check ─────────────────────────────────────────────────
 // Better than scattering `!` assertions everywhere and hoping — if something
@@ -89,17 +94,28 @@ function createMcpServer(): McpServer {
       limit: z.number().int().min(1).max(50).default(20),
     },
     async ({ username, limit }) => {
-      const data = await lcQuery<SubmissionHistoryResponse>(SUBMISSION_HISTORY_QUERY, {
-        username,
-        limit,
-      });
+      const data = await lcQuery<SubmissionHistoryResponse>(
+        SUBMISSION_HISTORY_QUERY,
+        {
+          username,
+          limit,
+        },
+      );
       const subs = data.recentSubmissionList;
 
       if (!subs || subs.length === 0) {
-        return { content: [{ type: "text", text: `No submissions found for user "${username}".` }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No submissions found for user "${username}".`,
+            },
+          ],
+        };
       }
 
-      const { byStatus, byLang, multipleAttempts } = categorizeSubmissions(subs);
+      const { byStatus, byLang, multipleAttempts } =
+        categorizeSubmissions(subs);
 
       const lines: string[] = [
         `## Submission History for @${username}`,
@@ -117,12 +133,14 @@ function createMcpServer(): McpServer {
 
       lines.push("\n### Recent Submissions");
       for (const s of subs.slice(0, 10)) {
-        const date = new Date(parseInt(s.timestamp) * 1000).toLocaleDateString();
+        const date = new Date(
+          parseInt(s.timestamp) * 1000,
+        ).toLocaleDateString();
         lines.push(`- [${s.statusDisplay}] ${s.title} (${s.lang}) — ${date}`);
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -136,7 +154,10 @@ function createMcpServer(): McpServer {
       ]);
 
       const user = tagData.matchedUser;
-      if (!user) return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+      if (!user)
+        return {
+          content: [{ type: "text", text: `User "${username}" not found.` }],
+        };
 
       const { weak, strong } = analyzeWeakAreas(user.tagProblemCounts);
       const stats = statsData.matchedUser?.submitStats?.acSubmissionNum || [];
@@ -145,7 +166,10 @@ function createMcpServer(): McpServer {
       const lines: string[] = [
         `## Weak Area Analysis for @${username}\n`,
         "### Overall Progress",
-        ...stats.map((s) => `- **${s.difficulty}**: ${s.count} solved (${s.submissions} total submissions)`),
+        ...stats.map(
+          (s) =>
+            `- **${s.difficulty}**: ${s.count} solved (${s.submissions} total submissions)`,
+        ),
       ];
 
       if (calendar) {
@@ -157,16 +181,18 @@ function createMcpServer(): McpServer {
         "\n### 🔴 Weak Areas (least solved topics)",
         ...weak.map((t) => `- **${t.tag}**: ${t.solved} problems solved`),
         "\n### 🟢 Strongest Topics",
-        ...strong.map((t) => `- **${t.tag}**: ${t.solved} problems solved`)
+        ...strong.map((t) => `- **${t.tag}**: ${t.solved} problems solved`),
       );
 
       lines.push("\n### 📚 Recommended Focus Areas");
       for (const t of weak.slice(0, 3)) {
-        lines.push(`- **${t.tag}**: Practice 3–5 Easy problems, then 2–3 Medium problems to build intuition.`);
+        lines.push(
+          `- **${t.tag}**: Practice 3–5 Easy problems, then 2–3 Medium problems to build intuition.`,
+        );
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -174,9 +200,14 @@ function createMcpServer(): McpServer {
     "Get overall stats and progress for a LeetCode user",
     { username: z.string().describe("LeetCode username") },
     async ({ username }) => {
-      const data = await lcQuery<UserStatsResponse>(USER_STATS_QUERY, { username });
+      const data = await lcQuery<UserStatsResponse>(USER_STATS_QUERY, {
+        username,
+      });
       const user = data.matchedUser;
-      if (!user) return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+      if (!user)
+        return {
+          content: [{ type: "text", text: `User "${username}" not found.` }],
+        };
 
       const stats = user.submitStats?.acSubmissionNum || [];
       const beats = user.problemsSolvedBeatsStats || [];
@@ -188,41 +219,59 @@ function createMcpServer(): McpServer {
         ...stats.map(
           (s) =>
             `- **${s.difficulty}**: ${s.count} accepted / ${s.submissions} submissions (${
-              s.submissions > 0 ? Math.round((s.count / s.submissions) * 100) : 0
-            }% acceptance)`
+              s.submissions > 0
+                ? Math.round((s.count / s.submissions) * 100)
+                : 0
+            }% acceptance)`,
         ),
       ];
 
       if (beats.length > 0) {
         lines.push("\n### Beats (better than X% of users)");
-        lines.push(...beats.map((b) => `- ${b.difficulty}: top ${(100 - b.percentage).toFixed(1)}%`));
+        lines.push(
+          ...beats.map(
+            (b) => `- ${b.difficulty}: top ${(100 - b.percentage).toFixed(1)}%`,
+          ),
+        );
       }
 
       if (calendar) {
-        lines.push(`\n### Activity`, `- 🔥 Streak: ${calendar.streak} days`, `- 📅 Total active days: ${calendar.totalActiveDays}`);
+        lines.push(
+          `\n### Activity`,
+          `- 🔥 Streak: ${calendar.streak} days`,
+          `- 📅 Total active days: ${calendar.totalActiveDays}`,
+        );
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
-  server.tool("get_daily_challenge", "Get today's LeetCode Daily Challenge problem", {}, async () => {
-    const data = await lcQuery<DailyChallengeResponse>(DAILY_CHALLENGE_QUERY);
-    const q = data.activeDailyCodingChallengeQuestion;
-    if (!q) return { content: [{ type: "text", text: "Could not fetch daily challenge." }] };
+  server.tool(
+    "get_daily_challenge",
+    "Get today's LeetCode Daily Challenge problem",
+    {},
+    async () => {
+      const data = await lcQuery<DailyChallengeResponse>(DAILY_CHALLENGE_QUERY);
+      const q = data.activeDailyCodingChallengeQuestion;
+      if (!q)
+        return {
+          content: [{ type: "text", text: "Could not fetch daily challenge." }],
+        };
 
-    const tags = q.question.topicTags.map((t) => t.name).join(", ");
-    const text = [
-      `## 📅 Daily Challenge — ${q.date}`,
-      `**${q.question.title}**`,
-      `Difficulty: ${q.question.difficulty}`,
-      `Acceptance Rate: ${q.question.acRate.toFixed(1)}%`,
-      `Topics: ${tags}`,
-      `Link: https://leetcode.com${q.link}`,
-    ].join("\n");
+      const tags = q.question.topicTags.map((t) => t.name).join(", ");
+      const text = [
+        `## 📅 Daily Challenge — ${q.date}`,
+        `**${q.question.title}**`,
+        `Difficulty: ${q.question.difficulty}`,
+        `Acceptance Rate: ${q.question.acRate.toFixed(1)}%`,
+        `Topics: ${tags}`,
+        `Link: https://leetcode.com${q.link}`,
+      ].join("\n");
 
-    return { content: [{ type: "text", text }] };
-  });
+      return { content: [{ type: "text", text }] };
+    },
+  );
 
   server.tool(
     "search_problems_by_topic",
@@ -236,7 +285,10 @@ function createMcpServer(): McpServer {
     async ({ tag, difficulty, limit, excludePremium }) => {
       const filters = {
         filterCombineType: "ALL",
-        difficultyFilter: { difficulties: difficulty ? [difficulty] : [], operator: "IS" },
+        difficultyFilter: {
+          difficulties: difficulty ? [difficulty] : [],
+          operator: "IS",
+        },
         topicFilter: { topicSlugs: tag ? [tag] : [], operator: "IS" },
       };
 
@@ -251,17 +303,24 @@ function createMcpServer(): McpServer {
 
       let questions = data.problemsetQuestionListV2.questions;
       if (excludePremium) questions = questions.filter((q) => !q.paidOnly);
-      if (!questions.length) return { content: [{ type: "text", text: "No problems found for those filters." }] };
+      if (!questions.length)
+        return {
+          content: [
+            { type: "text", text: "No problems found for those filters." },
+          ],
+        };
 
-      const lines: string[] = [`## Problems${tag ? ` — ${tag}` : ""}${difficulty ? ` (${difficulty})` : ""}\n`];
+      const lines: string[] = [
+        `## Problems${tag ? ` — ${tag}` : ""}${difficulty ? ` (${difficulty})` : ""}\n`,
+      ];
       for (const q of questions) {
         lines.push(
-          `- **${q.questionFrontendId}. ${q.title}**${q.paidOnly ? " 🔒" : ""} (${q.difficulty}) — ${q.acRate.toFixed(1)}% acceptance${q.frequency ? `, freq: ${q.frequency.toFixed(1)}` : ""}`
+          `- **${q.questionFrontendId}. ${q.title}**${q.paidOnly ? " 🔒" : ""} (${q.difficulty}) — ${q.acRate.toFixed(1)}% acceptance${q.frequency ? `, freq: ${q.frequency.toFixed(1)}` : ""}`,
         );
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -269,9 +328,17 @@ function createMcpServer(): McpServer {
     "Get the full details of a specific LeetCode problem",
     { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") },
     async ({ titleSlug }) => {
-      const data = await lcQuery<QuestionDetailResponse>(QUESTION_DETAIL_QUERY, { titleSlug });
+      const data = await lcQuery<QuestionDetailResponse>(
+        QUESTION_DETAIL_QUERY,
+        { titleSlug },
+      );
       const q = data.question;
-      if (!q) return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      if (!q)
+        return {
+          content: [
+            { type: "text", text: `Question "${titleSlug}" not found.` },
+          ],
+        };
 
       const cleanedContent = cleanHtmlContent(q.content);
       const stats = JSON.parse(q.stats);
@@ -284,17 +351,25 @@ function createMcpServer(): McpServer {
       ];
 
       if (q.topicTags.length > 0) {
-        lines.push("\n### Topic Tags", ...q.topicTags.map((t) => `- ${t.name}`));
+        lines.push(
+          "\n### Topic Tags",
+          ...q.topicTags.map((t) => `- ${t.name}`),
+        );
       }
       if (q.exampleTestcaseList?.length > 0) {
-        lines.push("\n### Example Testcases", "```", ...q.exampleTestcaseList, "```");
+        lines.push(
+          "\n### Example Testcases",
+          "```",
+          ...q.exampleTestcaseList,
+          "```",
+        );
       }
       if (q.hints?.length > 0) {
         lines.push("\n### Hints", ...q.hints.map((h, i) => `${i + 1}. ${h}`));
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -302,19 +377,36 @@ function createMcpServer(): McpServer {
     "Get similar problems for a specific LeetCode problem",
     { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") },
     async ({ titleSlug }) => {
-      const data = await lcQuery<SimilarQuestionsResponse>(SIMILAR_QUESTIONS_QUERY, { titleSlug });
+      const data = await lcQuery<SimilarQuestionsResponse>(
+        SIMILAR_QUESTIONS_QUERY,
+        { titleSlug },
+      );
       const q = data.question;
-      if (!q) return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      if (!q)
+        return {
+          content: [
+            { type: "text", text: `Question "${titleSlug}" not found.` },
+          ],
+        };
       if (q.similarQuestionList.length === 0) {
-        return { content: [{ type: "text", text: `No similar questions found for "${titleSlug}".` }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No similar questions found for "${titleSlug}".`,
+            },
+          ],
+        };
       }
 
       const lines: string[] = [`Similar Problems for ${q.title}:\n`];
       for (const sq of q.similarQuestionList) {
-        lines.push(`- **${sq.title}**${sq.isPaidOnly ? " 🔒" : ""} (${sq.difficulty})`);
+        lines.push(
+          `- **${sq.title}**${sq.isPaidOnly ? " 🔒" : ""} (${sq.difficulty})`,
+        );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -322,19 +414,36 @@ function createMcpServer(): McpServer {
     "LeetCode's suggested next challenges after a specific problem",
     { titleSlug: z.string().describe("URL slug, e.g. 'two-sum'") },
     async ({ titleSlug }) => {
-      const data = await lcQuery<NextChallengesResponse>(NEXT_CHALLENGES_QUERY, { titleSlug });
+      const data = await lcQuery<NextChallengesResponse>(
+        NEXT_CHALLENGES_QUERY,
+        { titleSlug },
+      );
       const q = data.question;
-      if (!q) return { content: [{ type: "text", text: `Question "${titleSlug}" not found.` }] };
+      if (!q)
+        return {
+          content: [
+            { type: "text", text: `Question "${titleSlug}" not found.` },
+          ],
+        };
       if (q.nextChallenges.length === 0) {
-        return { content: [{ type: "text", text: `No next challenges found for "${titleSlug}".` }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No next challenges found for "${titleSlug}".`,
+            },
+          ],
+        };
       }
 
       const lines: string[] = [`Next Challenges for ${q.title}:\n`];
       for (const nc of q.nextChallenges) {
-        lines.push(`- **LC ${nc.questionFrontendId}: ${nc.title}** (${nc.difficulty})`);
+        lines.push(
+          `- **LC ${nc.questionFrontendId}: ${nc.title}** (${nc.difficulty})`,
+        );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -347,14 +456,26 @@ function createMcpServer(): McpServer {
     },
     async ({ difficulty, tag, companies }) => {
       if (!difficulty && !tag && (!companies || companies.length === 0)) {
-        return { content: [{ type: "text", text: "Please provide at least a difficulty, tag, or company." }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Please provide at least a difficulty, tag, or company.",
+            },
+          ],
+        };
       }
 
       const filters = {
         filterCombineType: "ALL",
-        difficultyFilter: { difficulties: difficulty ? [difficulty] : [], operator: "IS" },
+        difficultyFilter: {
+          difficulties: difficulty ? [difficulty] : [],
+          operator: "IS",
+        },
         topicFilter: { topicSlugs: tag ? [tag] : [], operator: "IS" },
-        companyFilter: companies?.length ? { companySlugs: companies, operator: "IS" } : undefined,
+        companyFilter: companies?.length
+          ? { companySlugs: companies, operator: "IS" }
+          : undefined,
       };
 
       const data = await lcQuery<ProblemsetResponse>(PROBLEMSET_QUERY_V2, {
@@ -367,17 +488,34 @@ function createMcpServer(): McpServer {
       });
 
       const questions = data.problemsetQuestionListV2.questions;
-      if (!questions.length) return { content: [{ type: "text", text: "No problems found for those filters." }] };
+      if (!questions.length)
+        return {
+          content: [
+            { type: "text", text: "No problems found for those filters." },
+          ],
+        };
 
       const chosen = questions[Math.floor(Math.random() * questions.length)];
-      const detailData = await lcQuery<QuestionDetailResponse>(QUESTION_DETAIL_QUERY, {
-        titleSlug: chosen.titleSlug,
-      });
+      const detailData = await lcQuery<QuestionDetailResponse>(
+        QUESTION_DETAIL_QUERY,
+        {
+          titleSlug: chosen.titleSlug,
+        },
+      );
       const q = detailData.question;
-      if (!q) return { content: [{ type: "text", text: "Selected a problem but couldn't load its details." }] };
+      if (!q)
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Selected a problem but couldn't load its details.",
+            },
+          ],
+        };
 
       const cleanedContent = cleanHtmlContent(q.content);
-      const timeLimit = difficultyBasedTimeLimit(q.difficulty as Difficulty) ?? 30;
+      const timeLimit =
+        difficultyBasedTimeLimit(q.difficulty as Difficulty) ?? 30;
 
       const lines: string[] = [
         `## Mock Interview${companies?.length ? ` — targeting: ${companies.join(", ")}` : ""}`,
@@ -391,13 +529,22 @@ function createMcpServer(): McpServer {
         cleanedContent,
       ];
 
-      if (q.topicTags.length > 0) lines.push("\n### Topic Tags", ...q.topicTags.map((t) => `- ${t.name}`));
+      if (q.topicTags.length > 0)
+        lines.push(
+          "\n### Topic Tags",
+          ...q.topicTags.map((t) => `- ${t.name}`),
+        );
       if (q.exampleTestcaseList?.length > 0) {
-        lines.push("\n### Example Testcases", "```", ...q.exampleTestcaseList, "```");
+        lines.push(
+          "\n### Example Testcases",
+          "```",
+          ...q.exampleTestcaseList,
+          "```",
+        );
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -412,7 +559,15 @@ function createMcpServer(): McpServer {
       outcome: z.enum(OUTCOMES),
       notes: z.string().optional(),
     },
-    async ({ username, titleSlug, title, difficulty, tags, outcome, notes }) => {
+    async ({
+      username,
+      titleSlug,
+      title,
+      difficulty,
+      tags,
+      outcome,
+      notes,
+    }) => {
       const existing = await getProblemRecord(username, titleSlug);
 
       const currentBox = existing ? existing.box : null;
@@ -430,10 +585,18 @@ function createMcpServer(): McpServer {
         lastOutcome: outcome,
         lastReviewed: now,
         nextReviewDue,
-        history: [...(existing?.history ?? []), { timestamp: now, outcome, notes: notes ?? null }],
+        history: [
+          ...(existing?.history ?? []),
+          { timestamp: now, outcome, notes: notes ?? null },
+        ],
       };
 
-      await setProblemRecord(username, titleSlug, updatedRecord, convertToUnixTimestamp(nextReviewDue));
+      await setProblemRecord(
+        username,
+        titleSlug,
+        updatedRecord,
+        convertToUnixTimestamp(nextReviewDue),
+      );
 
       const readableDate = new Date(nextReviewDue).toLocaleDateString("en-US", {
         weekday: "long",
@@ -449,7 +612,7 @@ function createMcpServer(): McpServer {
       ].filter((l): l is string => l !== null);
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -460,7 +623,9 @@ function createMcpServer(): McpServer {
       const { overdue, dueToday } = await getDueAndOverdue(username);
 
       if (overdue.length === 0 && dueToday.length === 0) {
-        return { content: [{ type: "text", text: "Nothing is due right now!" }] };
+        return {
+          content: [{ type: "text", text: "Nothing is due right now!" }],
+        };
       }
 
       const lines: string[] = [`## Review Queue for @${username}`];
@@ -469,7 +634,9 @@ function createMcpServer(): McpServer {
         lines.push(`\n**${overdue.length} overdue**`);
         for (const record of overdue) {
           const days = daysOverdue(record.nextReviewDue);
-          lines.push(`- ${record.title} (box ${record.box}) — ${days} day${days === 1 ? "" : "s"} overdue`);
+          lines.push(
+            `- ${record.title} (box ${record.box}) — ${days} day${days === 1 ? "" : "s"} overdue`,
+          );
         }
       }
 
@@ -481,7 +648,7 @@ function createMcpServer(): McpServer {
       }
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -494,24 +661,51 @@ function createMcpServer(): McpServer {
       phoneNumber: z.string().optional(),
     },
     async ({ username, intensity, activeDays, phoneNumber }) => {
-      if (intensity === "MODERATE" && (!activeDays || (activeDays.length !== 3 && activeDays.length !== 4))) {
-        return { content: [{ type: "text", text: "MODERATE intensity needs exactly 3 or 4 active days." }] };
+      if (
+        intensity === "MODERATE" &&
+        (!activeDays || (activeDays.length !== 3 && activeDays.length !== 4))
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "MODERATE intensity needs exactly 3 or 4 active days.",
+            },
+          ],
+        };
       }
       if (intensity === "BUSY" && (!activeDays || activeDays.length !== 2)) {
-        return { content: [{ type: "text", text: "BUSY intensity needs exactly 2 active days." }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "BUSY intensity needs exactly 2 active days.",
+            },
+          ],
+        };
       }
 
       const existing = await getUserSettings(username);
       const resolvedPhoneNumber = phoneNumber ?? existing?.phoneNumber;
 
       if (!resolvedPhoneNumber) {
-        return { content: [{ type: "text", text: "No phone number on file — please provide one." }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No phone number on file — please provide one.",
+            },
+          ],
+        };
       }
 
       const updatedSettings: UserSettings = {
         username,
         intensity,
-        activeDays: intensity === "GRIND" || intensity === "MINIMAL" ? null : (activeDays as DayOfWeek[]),
+        activeDays:
+          intensity === "GRIND" || intensity === "MINIMAL"
+            ? null
+            : (activeDays as DayOfWeek[]),
         phoneNumber: resolvedPhoneNumber,
       };
 
@@ -520,8 +714,8 @@ function createMcpServer(): McpServer {
       const dayLabel = updatedSettings.activeDays
         ? updatedSettings.activeDays.join(", ")
         : intensity === "GRIND"
-        ? "every day"
-        : "Sundays only";
+          ? "every day"
+          : "Sundays only";
 
       const lines = [
         `Tether intensity set to **${intensity}**`,
@@ -531,7 +725,7 @@ function createMcpServer(): McpServer {
       ];
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   server.tool(
@@ -539,23 +733,32 @@ function createMcpServer(): McpServer {
     "Compare a user's LeetCode tag coverage against core FAANG interview topics",
     { username: z.string() },
     async ({ username }) => {
-      const data = await lcQuery<ProblemTagsResponse>(PROBLEM_TAGS_QUERY, { username });
+      const data = await lcQuery<ProblemTagsResponse>(PROBLEM_TAGS_QUERY, {
+        username,
+      });
       const user = data.matchedUser;
-      if (!user) return { content: [{ type: "text", text: `User "${username}" not found.` }] };
+      if (!user)
+        return {
+          content: [{ type: "text", text: `User "${username}" not found.` }],
+        };
 
       const allTags = [
         ...user.tagProblemCounts.advanced,
         ...user.tagProblemCounts.intermediate,
         ...user.tagProblemCounts.fundamental,
       ];
-      const solvedMap = new Map(allTags.map((t) => [t.tagName, t.problemsSolved]));
+      const solvedMap = new Map(
+        allTags.map((t) => [t.tagName, t.problemsSolved]),
+      );
 
       const resultArray = CORE_FAANG_TAGS.map((tag) => {
         const solved = solvedMap.get(tag) ?? 0;
         return { tag, solved, status: coverageStatus(solved) };
       }).sort((a, b) => a.solved - b.solved);
 
-      const criticalCount = resultArray.filter((r) => r.status.includes("Critical")).length;
+      const criticalCount = resultArray.filter((r) =>
+        r.status.includes("Critical"),
+      ).length;
 
       const lines: string[] = [
         `## Topic Coverage vs. Core FAANG Interview Tags\n`,
@@ -565,19 +768,20 @@ function createMcpServer(): McpServer {
         ...resultArray.map((r) => `| ${r.tag} | ${r.solved} | ${r.status} |`),
       ];
 
-      const exploreArray = EXPLORE_TAGS.map((tag) => ({ tag, solved: solvedMap.get(tag) ?? 0 })).sort(
-        (a, b) => a.solved - b.solved
-      );
+      const exploreArray = EXPLORE_TAGS.map((tag) => ({
+        tag,
+        solved: solvedMap.get(tag) ?? 0,
+      })).sort((a, b) => a.solved - b.solved);
 
       lines.push(
         "\n### Explore Later (situational / company-dependent)",
         "| Topic | Solved |",
         "|---|---|",
-        ...exploreArray.map((r) => `| ${r.tag} | ${r.solved} |`)
+        ...exploreArray.map((r) => `| ${r.tag} | ${r.solved} |`),
       );
 
       return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
+    },
   );
 
   return server;
@@ -586,7 +790,7 @@ function createMcpServer(): McpServer {
 // ─── Shared logic used by both get_due_for_review AND daily_check ───────────
 
 async function getDueAndOverdue(
-  username: string
+  username: string,
 ): Promise<{ overdue: ProblemRecord[]; dueToday: ProblemRecord[] }> {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const startOfToday = new Date();
@@ -600,11 +804,15 @@ async function getDueAndOverdue(
   const validRecords = records.filter((r): r is ProblemRecord => r !== null);
 
   const overdue = validRecords
-    .filter((r) => convertToUnixTimestamp(r.nextReviewDue) < startOfTodaySeconds)
-    .sort((a, b) => daysOverdue(b.nextReviewDue) - daysOverdue(a.nextReviewDue));
+    .filter(
+      (r) => convertToUnixTimestamp(r.nextReviewDue) < startOfTodaySeconds,
+    )
+    .sort(
+      (a, b) => daysOverdue(b.nextReviewDue) - daysOverdue(a.nextReviewDue),
+    );
 
   const dueToday = validRecords.filter(
-    (r) => convertToUnixTimestamp(r.nextReviewDue) >= startOfTodaySeconds
+    (r) => convertToUnixTimestamp(r.nextReviewDue) >= startOfTodaySeconds,
   );
 
   return { overdue, dueToday };
@@ -635,16 +843,32 @@ async function runAgingSweep(username: string): Promise<void> {
       ...record,
       box: newBox,
       nextReviewDue,
-      history: [...record.history, { timestamp: now, outcome: "AUTO_AGED", notes: null }],
+      history: [
+        ...record.history,
+        { timestamp: now, outcome: "AUTO_AGED", notes: null },
+      ],
     };
 
-    await setProblemRecord(username, staleSlugs[i], updatedRecord, convertToUnixTimestamp(nextReviewDue));
+    await setProblemRecord(
+      username,
+      staleSlugs[i],
+      updatedRecord,
+      convertToUnixTimestamp(nextReviewDue),
+    );
   }
 }
 
 // ─── Day-of-week check ────────────────────────────────────────────────────────
 
-const DAY_NAMES: DayOfWeek[] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+const DAY_NAMES: DayOfWeek[] = [
+  "SUN",
+  "MON",
+  "TUE",
+  "WED",
+  "THU",
+  "FRI",
+  "SAT",
+];
 
 function isActiveToday(settings: UserSettings): boolean {
   const today = DAY_NAMES[new Date().getDay()];
@@ -670,7 +894,10 @@ interface OAuthClient {
 }
 
 const clients = new Map<string, OAuthClient>();
-const authCodes = new Map<string, { client_id: string; redirect_uri: string; expires: number }>();
+const authCodes = new Map<
+  string,
+  { client_id: string; redirect_uri: string; expires: number }
+>();
 const tokens = new Map<string, { client_id: string; expires: number }>();
 
 function randomToken(prefix: string): string {
@@ -678,27 +905,35 @@ function randomToken(prefix: string): string {
 }
 
 function baseUrl(req: Request): string {
-  return process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+  return (
+    process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`
+  );
 }
 
-app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response) => {
-  const b = baseUrl(req);
-  res.json({
-    issuer: b,
-    authorization_endpoint: `${b}/oauth/authorize`,
-    token_endpoint: `${b}/oauth/token`,
-    registration_endpoint: `${b}/oauth/register`,
-    response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
-    code_challenge_methods_supported: ["S256", "plain"],
-    token_endpoint_auth_methods_supported: ["none"],
-  });
-});
+app.get(
+  "/.well-known/oauth-authorization-server",
+  (req: Request, res: Response) => {
+    const b = baseUrl(req);
+    res.json({
+      issuer: b,
+      authorization_endpoint: `${b}/oauth/authorize`,
+      token_endpoint: `${b}/oauth/token`,
+      registration_endpoint: `${b}/oauth/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256", "plain"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
+  },
+);
 
-app.get("/.well-known/oauth-protected-resource", (req: Request, res: Response) => {
-  const b = baseUrl(req);
-  res.json({ resource: `${b}/mcp`, authorization_servers: [b] });
-});
+app.get(
+  "/.well-known/oauth-protected-resource",
+  (req: Request, res: Response) => {
+    const b = baseUrl(req);
+    res.json({ resource: `${b}/mcp`, authorization_servers: [b] });
+  },
+);
 
 app.post("/oauth/register", (req: Request, res: Response) => {
   const client_id = randomToken("client");
@@ -715,11 +950,19 @@ app.post("/oauth/register", (req: Request, res: Response) => {
 });
 
 app.get("/oauth/authorize", (req: Request, res: Response) => {
-  const { redirect_uri, state, client_id } = req.query as { redirect_uri?: string; state?: string; client_id?: string };
+  const { redirect_uri, state, client_id } = req.query as {
+    redirect_uri?: string;
+    state?: string;
+    client_id?: string;
+  };
   if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
 
   const code = randomToken("code");
-  authCodes.set(code, { client_id: client_id ?? "", redirect_uri, expires: Date.now() + 60_000 });
+  authCodes.set(code, {
+    client_id: client_id ?? "",
+    redirect_uri,
+    expires: Date.now() + 60_000,
+  });
 
   const url = new URL(redirect_uri);
   url.searchParams.set("code", code);
@@ -727,24 +970,37 @@ app.get("/oauth/authorize", (req: Request, res: Response) => {
   res.redirect(url.toString());
 });
 
-app.post("/oauth/token", express.urlencoded({ extended: true }), (req: Request, res: Response) => {
-  const { code, grant_type } = req.body;
-  if (grant_type !== "authorization_code") return res.status(400).json({ error: "unsupported_grant_type" });
+app.post(
+  "/oauth/token",
+  express.urlencoded({ extended: true }),
+  (req: Request, res: Response) => {
+    const { code, grant_type } = req.body;
+    if (grant_type !== "authorization_code")
+      return res.status(400).json({ error: "unsupported_grant_type" });
 
-  const entry = authCodes.get(code);
-  if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: "invalid_grant" });
-  authCodes.delete(code);
+    const entry = authCodes.get(code);
+    if (!entry || entry.expires < Date.now())
+      return res.status(400).json({ error: "invalid_grant" });
+    authCodes.delete(code);
 
-  const access_token = randomToken("token");
-  tokens.set(access_token, { client_id: entry.client_id, expires: Date.now() + 3_600_000 });
-  res.json({ access_token, token_type: "Bearer", expires_in: 3600 });
-});
+    const access_token = randomToken("token");
+    tokens.set(access_token, {
+      client_id: entry.client_id,
+      expires: Date.now() + 3_600_000,
+    });
+    res.json({ access_token, token_type: "Bearer", expires_in: 3600 });
+  },
+);
 
-app.get("/health", (_req: Request, res: Response) => res.json({ status: "ok", server: "tether-connector" }));
+app.get("/health", (_req: Request, res: Response) =>
+  res.json({ status: "ok", server: "tether-connector" }),
+);
 
 app.post("/mcp", async (req: Request, res: Response) => {
   const server = createMcpServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
   res.on("close", () => transport.close());
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
@@ -779,7 +1035,8 @@ app.post("/internal/daily-check", async (req: Request, res: Response) => {
     if (overdue.length > 0 || dueToday.length > 0) {
       const parts: string[] = [];
       if (overdue.length > 0) parts.push(`${overdue.length} problems overdue`);
-      if (dueToday.length > 0) parts.push(`${dueToday.length} problems due today`);
+      if (dueToday.length > 0)
+        parts.push(`${dueToday.length} problems due today`);
       messages.push(parts.join(" · "));
       // TODO: send via Twilio
     }
