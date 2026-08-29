@@ -32,7 +32,7 @@ export function normalizePhone(raw: string): string | null{
     return null; // every other case fails
 }
 
-function generateOTPCode(): String{
+function generateOTPCode(): string{
     // randomInt(0, 1_000_000) is uniform over [0, 999999] 
     // pad to always by 6 digits: so 482 becomes 000482
     return randomInt(0, 1_000_000).toString().padStart(6, "0");
