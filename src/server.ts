@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import "dotenv/config";
+import { randomBytes } from "node:crypto"
 
 import {
   redis,
@@ -912,7 +913,7 @@ const tokens = new Map<
 >();
 
 function randomToken(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  return `${prefix}_${randomBytes(32).toString("hex")}`;
 }
 
 function baseUrl(req: Request): string {
@@ -973,7 +974,7 @@ function escapeHtml(s: string): string {
       ({
         "&": "&amp;",
         "<": "&lt;",
-        ">": "&gt",
+        ">": "&gt;",
         '"': "&quot;",
         "'": "&#39;",
       })[c]!,
@@ -1211,21 +1212,22 @@ app.post(
             ),
           );
         }
-      }
+        username = leetcodeUsername.trim();
 
-      username = leetcodeUsername.trim();
+        await registerUser(normalizedPhone, username);
 
-      await registerUser(normalizedPhone, username);
+        const existingSettings = await getUserSettings(username);
 
-      const existingSettings = await getUserSettings(username);
-
-      if (!existingSettings) {
-        await setUserSettings(username, {
-          username,
-          intensity: "MINIMAL",
-          activeDays: null,
-          phoneNumber: normalizedPhone,
-        });
+        if (!existingSettings) {
+            // MINIMAL needs no activeDays (see set_review_intensity's validation),
+            // so this is a safe default until the person tunes it via the tool.
+            await setUserSettings(username, {
+            username,
+            intensity: "MINIMAL",
+            activeDays: null,
+            phoneNumber: normalizedPhone,
+            });
+        }
       }
 
       const authCode = randomToken("code");

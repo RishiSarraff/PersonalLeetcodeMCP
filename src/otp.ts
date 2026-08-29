@@ -44,13 +44,13 @@ export type SendOTPResult =
     }
   | {
       ok: false;
-      reason: "invalid phone" | "cooldown" | "send_failed";
+      reason: "invalid_phone" | "cooldown" | "send_failed";
       error?: string;
     };
 
 export async function sendOTP(rawPhone: string): Promise<SendOTPResult> {
   const phone = normalizePhone(rawPhone);
-  if (!phone) return { ok: false, reason: "invalid phone" };
+  if (!phone) return { ok: false, reason: "invalid_phone" };
 
   const allowed = await tryStartOTPCooldown(phone);
   if (!allowed) return { ok: false, reason: "cooldown" };
