@@ -48,7 +48,7 @@ export type SendOTPResult =
       error?: string;
     };
 
-export async function sendOtp(rawPhone: string): Promise<SendOTPResult> {
+export async function sendOTP(rawPhone: string): Promise<SendOTPResult> {
   const phone = normalizePhone(rawPhone);
   if (!phone) return { ok: false, reason: "invalid phone" };
 

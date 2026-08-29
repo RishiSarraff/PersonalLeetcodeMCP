@@ -170,8 +170,8 @@ export async function registerUser(
     .exec();
 }
 
-export async function getAllUsernames(): Promise<string[]>{
-  return redis.smembers(allUsersKey())
+export async function getAllUsernames(): Promise<string[]> {
+  return redis.smembers(allUsersKey());
 }
 
 // ─── Batch reads for the review queue ────────────────────────────────────────

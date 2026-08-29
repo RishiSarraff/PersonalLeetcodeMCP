@@ -16,7 +16,11 @@ import {
   getProblemRecordsBatch,
   recordKey,
   queueKey,
+  getUsernameForPhone,
+  registerUser,
 } from "./redis.js";
+
+import { sendOTP, verifyOTP } from "./otp.js";
 
 import {
   lcQuery,
@@ -76,7 +80,7 @@ const REQUIRED_ENV_VARS = [
 
 for (const key of REQUIRED_ENV_VARS) {
   if (!process.env[key]) {
-    console.error(`❌ Missing required env var: ${key}`);
+    console.error(`Missing required env var: ${key}`);
     process.exit(1);
   }
 }
@@ -896,9 +900,16 @@ interface OAuthClient {
 const clients = new Map<string, OAuthClient>();
 const authCodes = new Map<
   string,
-  { client_id: string; redirect_uri: string; expires: number }
+  { client_id: string; redirect_uri: string; username: string; expires: number }
 >();
-const tokens = new Map<string, { client_id: string; expires: number }>();
+// `username` living in this in-memory map is the same that the JWT step replaces
+// instead of a server-side lookup table, the token itself will carry
+// `sub: username`, signed, so that it survives a server restart and doesn't leak across
+// instances if this ever runs on more than one dyno.
+const tokens = new Map<
+  string,
+  { client_id: string; username: string; expires: number }
+>();
 
 function randomToken(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
@@ -949,6 +960,50 @@ app.post("/oauth/register", (req: Request, res: Response) => {
   res.status(201).json(client);
 });
 
+// ─── Phone + OTP login ────────────────────────────────────────────────────
+// Replaces the old instant-issue stub. This is the actual point where a
+// human proves who they are before Claude gets a token and, according to Twilio's
+// toll-free verification requirements, the actual consent-capturing UI that
+// the "opt-in policy proof" screenshot points at.
+
+function escapeHtml(s: string): string {
+  return s.replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c]!,
+  );
+}
+
+function hiddenFields(fields: Record<string, string>): string {
+  return Object.entries(fields)
+    .map(
+      ([k, v]) =>
+        `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`,
+    )
+    .join("\n");
+}
+
+function pageShell(title: string, body: string): string {
+  return `<!DOCTYPE html>
+  <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 420px; margin: 60px auto; padding: 0 20px; }
+    input { width: 100%; padding: 10px; margin: 8px 0 16px; font-size: 16px; box-sizing: border-box; }
+    button { width: 100%; padding: 10px; font-size: 16px; cursor: pointer; }
+    .disclosure { font-size: 12px; color: #666; margin-top: -8px; margin-bottom: 16px; }
+    .error { color: #b00020; margin-bottom: 12px; }
+</style></head><body>
+<h2>${escapeHtml(title)}</h2>
+${body}
+</body></html>`;
+}
+
 app.get("/oauth/authorize", (req: Request, res: Response) => {
   const { redirect_uri, state, client_id } = req.query as {
     redirect_uri?: string;
@@ -957,37 +1012,278 @@ app.get("/oauth/authorize", (req: Request, res: Response) => {
   };
   if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
 
-  const code = randomToken("code");
-  authCodes.set(code, {
-    client_id: client_id ?? "",
-    redirect_uri,
-    expires: Date.now() + 60_000,
-  });
-
-  const url = new URL(redirect_uri);
-  url.searchParams.set("code", code);
-  if (state) url.searchParams.set("state", state);
-  res.redirect(url.toString());
+  res.send(
+    pageShell(
+      "Sign in to Tether",
+      `<form method="POST" action="/auth/otp/send">
+        ${hiddenFields({ redirect_uri, state: state ?? "", client_id: client_id ?? "" })}
+        <label for="phone">Phone number</label>
+        <input type="tel" id="phone" name="phone" placeholder="+1 555 555 5555" required>
+        <div class="disclosure">
+          By entering your phone number, you agree to receive automated SMS
+          messages from Tether for LeetCode review reminders. Message
+          frequency varies. Msg &amp; data rates may apply. Reply STOP to
+          unsubscribe, HELP for help.
+        </div>
+        <button type="submit">Send code</button>
+      </form>`,
+    ),
+  );
 });
+
+function errorPage(hidden: string, retryAction: string, message: string) {
+  return pageShell(
+    "Sign in to Tether",
+    `<div class="error">${escapeHtml(message)}</div>
+        <form method="POST" action="${retryAction}">
+          ${hidden}
+          <button type="submit">Try again</button>
+        </form>`,
+  );
+}
+
+app.post(
+  "/auth/otp/send",
+  express.urlencoded({ extended: true }),
+  async (req: Request, res: Response) => {
+    const { phone, redirect_uri, state, client_id } = req.body as Record<
+      string,
+      string
+    >;
+
+    if (!phone || !redirect_uri)
+      return res.status(400).send("Missing a Phone Number or Redirect_URI.");
+
+    const hidden = hiddenFields({
+      phone,
+      redirect_uri,
+      state: state ?? "",
+      client_id: client_id ?? "",
+    });
+
+    let result;
+
+    try {
+      result = await sendOTP(phone);
+    } catch (err) {
+      console.log("sendOTP Failed", err);
+      return res
+        .status(502)
+        .send(
+          errorPage(
+            hidden,
+            "/auth/otp/send",
+            "Something went wrong on our end. Please try again later.",
+          ),
+        );
+    }
+
+    if (!result.ok) {
+      const messages: Record<string, string> = {
+        invalid_phone: "That doesn't look like a phone number.",
+        cooldown:
+          "A code was already sent, please check your phone or wait a minute before requesting another.",
+        send_failed:
+          "Couldn't send that text right now. Please try again shortly.",
+      };
+
+      return res.send(
+        pageShell(
+          "Sign into Tether",
+          `<div class="error">${escapeHtml(messages[result.reason] ?? "Something went wrong.")}</div>
+                    <form method="POST" action="/auth/otp/send">
+                    ${hidden}
+                    <button type="submit">Try again</button>
+                    </form>`,
+        ),
+      );
+    }
+
+    let existingUsername: string | null;
+    try {
+      existingUsername = await getUsernameForPhone(
+        phone.replace(/[^\d+]/g, ""),
+      );
+    } catch (err) {
+      console.error("getUsernameForPhone failed: ", err);
+      return res
+        .status(502)
+        .send(
+          errorPage(
+            hidden,
+            "/auth/otp/send",
+            "Something went wrong on our end. Please try again later.",
+          ),
+        );
+    }
+
+    res.send(
+      pageShell(
+        "Enter your code",
+        `<form method="POST" action="/auth/otp/verify">
+                    ${hidden}
+                    <label for="code">6-digit code</label>
+                    <input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" required autofocus>
+                    ${
+                      existingUsername
+                        ? ""
+                        : `<label for="leetcodeUsername">LeetCode username (first time only)</label>
+                        <input type="text" id="leetcodeUsername" name="leetcodeUsername" required>`
+                    }
+                    <button type="submit">Verify</button>
+                </form>`,
+      ),
+    );
+  },
+);
+
+app.post(
+  "/auth/otp/verify",
+  express.urlencoded({ extended: true }),
+  async (req: Request, res: Response) => {
+    const { phone, code, leetcodeUsername, redirect_uri, state, client_id } =
+      req.body as Record<string, string>;
+
+    if (!phone || !code || !redirect_uri) {
+      return res.status(400).send("Missing required fields");
+    }
+
+    const hidden = hiddenFields({
+      phone,
+      redirect_uri,
+      state: state ?? "",
+      client_id: client_id ?? "",
+    });
+
+    let result;
+
+    try {
+      result = await verifyOTP(phone, code);
+    } catch (err) {
+      console.error("verifyOTP failed: ", err);
+      return res
+        .status(502)
+        .send(
+          errorPage(
+            hidden,
+            "/auth/otp/verify",
+            "Something went wrong on our end. Please try again later.",
+          ),
+        );
+    }
+
+    if (result !== "ok") {
+      const messages: Record<string, string> = {
+        invalid_phone: "That doesn't look like a phone number.",
+        expired: "This code expired, please request a new code.",
+        too_many_attempts: "Too many wrong attempts, please try a new code.",
+        invalid: "That code doesn't match. Double check and try again.",
+      };
+
+      return res.send(
+        pageShell(
+          "Enter your code",
+          `<div class="error">${escapeHtml(messages[result])}</div>
+                    <form method="POST" action="/auth/otp/send">
+                        ${hiddenFields({ phone, redirect_uri, state: state ?? "", client_id: client_id ?? "" })}
+                        <button type="submit">Send a new code</button>
+                    </form>`,
+        ),
+      );
+    }
+
+    const normalizedPhone = phone.replace(/[^\d+]/g, "");
+
+    try {
+      let username = await getUsernameForPhone(normalizedPhone);
+      if (!username) {
+        if (!leetcodeUsername?.trim()) {
+          return res.send(
+            pageShell(
+              "Almost done",
+              `<div class="error">First-time sign-in needs your LeetCode username.</div>
+                                <form method="POST" action="/auth/otp/verify">
+                                ${hidden}
+                                <label for="leetcodeUsername">LeetCode Username</label>
+                                <input type="text" id="leetcodeUsername" name="leetcodeUsername" required>
+                                <button type="submit">Finish signing in</button>
+                            </form>`,
+            ),
+          );
+        }
+      }
+
+      username = leetcodeUsername.trim();
+
+      await registerUser(normalizedPhone, username);
+
+      const existingSettings = await getUserSettings(username);
+
+      if (!existingSettings) {
+        await setUserSettings(username, {
+          username,
+          intensity: "MINIMAL",
+          activeDays: null,
+          phoneNumber: normalizedPhone,
+        });
+      }
+
+      const authCode = randomToken("code");
+      authCodes.set(authCode, {
+        client_id: client_id ?? "",
+        redirect_uri,
+        username,
+        expires: Date.now() + 60_000,
+      });
+
+      const url = new URL(redirect_uri);
+
+      url.searchParams.set("code", authCode);
+
+      if (state) {
+        url.searchParams.set("state", state);
+      }
+
+      res.redirect(url.toString());
+    } catch (err) {
+      console.error("otp/verify user-creation step failed: ", err);
+      res
+        .status(502)
+        .send(
+          errorPage(
+            hidden,
+            "/auth/otp/send",
+            "Something went wrong. Please try again later.",
+          ),
+        );
+    }
+  },
+);
 
 app.post(
   "/oauth/token",
   express.urlencoded({ extended: true }),
   (req: Request, res: Response) => {
     const { code, grant_type } = req.body;
-    if (grant_type !== "authorization_code")
+    if (grant_type !== "authorization_code"){
       return res.status(400).json({ error: "unsupported_grant_type" });
+    }
 
     const entry = authCodes.get(code);
-    if (!entry || entry.expires < Date.now())
+    if (!entry || entry.expires < Date.now()){
       return res.status(400).json({ error: "invalid_grant" });
+    }
+
     authCodes.delete(code);
 
     const access_token = randomToken("token");
+    
     tokens.set(access_token, {
       client_id: entry.client_id,
+      username: entry.username,
       expires: Date.now() + 3_600_000,
     });
+    
     res.json({ access_token, token_type: "Bearer", expires_in: 3600 });
   },
 );
